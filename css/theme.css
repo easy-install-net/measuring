@@ -19,7 +19,7 @@ body {
   background: var(--bg-page);
   color: var(--text-main);
   font-size: 14px;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .hidden { display: none !important; }
@@ -28,7 +28,7 @@ body {
   background: #FEF3C7;
   color: #92400E;
   border-bottom: 1px solid #F59E0B;
-  padding: 6px 10px;
+  padding: 5px 10px;
   font-size: 12px;
   font-weight: 600;
   text-align: center;
@@ -38,7 +38,7 @@ body {
   position: sticky; top: 0; z-index: 50;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border-dark);
-  padding: 8px 12px;
+  padding: 6px 12px;
   display: flex; justify-content: space-between; align-items: center;
 }
 .brand-title { font-weight: 800; letter-spacing: 0.8px; font-size: 15px; }
@@ -49,27 +49,27 @@ body {
 .dot-amber { background: var(--color-warn); }
 .dot-red { background: var(--color-alert); }
 
-/* 緊湊按鈕與標籤尺寸 */
+/* 超緊湊按鈕尺寸 */
 .btn-solid, .btn-outline {
   border-radius: 4px;
   font-weight: 600;
   cursor: pointer;
-  padding: 5px 10px;
-  font-size: 13px;
-  line-height: 1.25;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.2;
   border: 1px solid var(--border-dark);
 }
 .btn-solid { background: var(--border-dark); color: #FFFFFF; }
 .btn-outline { background: #FFFFFF; color: var(--text-main); }
-.btn-sm { padding: 3px 8px; font-size: 12px; }
+.btn-sm { padding: 2px 7px; font-size: 12px; }
 
-.app-container { max-width: 1120px; margin: 0 auto; padding: 10px; }
+.app-container { max-width: 1140px; margin: 0 auto; padding: 8px; }
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border-line);
   border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
 }
 .section-title {
   font-size: 12px; font-weight: 700; color: var(--text-sub);
@@ -77,21 +77,25 @@ body {
   margin: 0 0 6px 0;
 }
 
-.chip-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip-grid { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip {
   background: #FFFFFF;
   border: 1px solid var(--border-line);
   color: var(--text-main);
-  padding: 3px 8px;
+  padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  line-height: 1.25;
+  line-height: 1.2;
   white-space: nowrap;
   cursor: pointer;
+  user-select: none;
 }
 .chip.active {
   background: var(--border-dark);
   border-color: var(--border-dark);
   color: #FFFFFF;
 }
+.chip-draggable { cursor: grab; }
+.chip-draggable:active { cursor: grabbing; opacity: 0.75; }
+.chip-drag-over { border: 1.5px dashed #2563EB !important; background: #EFF6FF !important; }
 .chip-pinned::before { content: "★ "; font-size: 10px; }
