@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>工程度尺核對預覽 | MEASURING</title>
+  <link rel="stylesheet" href="./css/theme.css" />
+  <link rel="stylesheet" href="./css/canvas-labels.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <span class="brand-title">MEASURING</span>
+      <span style="font-size:12px; padding:2px 6px; border:1px solid #111827; border-radius:3px;">客戶唯讀預覽</span>
+    </div>
+    <button onclick="window.print()" class="btn-solid btn-sm">列印 / 存為 PDF</button>
+  </header>
+
+  <main id="preview-root" class="app-container">
+    <div class="card">正在載入加密預覽報告...</div>
+  </main>
+
+  <script type="module">
+    import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { db, COLLECTIONS } from "./js/config/firebase-init.js";
+
+    const root = document.getElementById("preview-root");
+    const token = new URLSearchParams(window.location.search).get("token");
+
+    async function loadPreview() {
+      if (!token) {
+        root.innerHTML = `<div class="card">無效的預覽連結，請向工程負責人索取最新連結。</div>`;
+        return;
+      }
+      const snap = await getDoc(doc(db, COLLECTIONS.REPORTS_PUBLIC, token));
+      if (!snap.exists()) {
+        root.innerHTML = `<div class="card">此預覽連結已過期或被關閉。</div>`;
+        return;
+      }
+      const data = snap.data();
+      const pagesHtml = (data.pages || []).map(p => {
+        const linesSvg = (p.lines || []).map(l => `
+          <line x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}" stroke="${l.color}" stroke-width="4" />
+          <circle cx="${l.x1}" cy="${l.y1}" r="6" fill="${l.color}" />
+          <circle cx="${l.x2}" cy="${l.y2}" r="6" fill="${l.color}" />
+        `).join("");
+
+        const labelsHtml = (p.lines || []).map((l, idx) => `
+          <div class="dim-pill-label" style="left:${l.lx / 10}%; top:${l.ly / 10}%; color:${l.color}; cursor:default;">
+            ${l.value}<span class="dim-report-badge">#${idx + 1}</span>
+          </div>
+        `).join("");
+
+        const dimList = (p.lines || []).map((l, idx) => `
+          <div style="font-size:14px; padding:4px 0; border-bottom:1px solid #E5E7EB;">
+            <strong>#${idx + 1}</strong> ${l.value} ${l.note ? `（${l.note}）` : ""}
+          </div>
+        `).join("");
+
+        const auditList = (p.auditTickets || []).map(t => `
+          <div style="font-size:13px; padding:6px; margin-top:4px; border-left:3px solid ${t.status === "conflict" ? "#DC2626" : t.status === "pass" ? "#16A34A" : "#D97706"}; background:#F9FAFB;">
+            <strong>${t.status === "conflict" ? "🔴 衝突需改" : t.status === "pass" ? "🟢 通過" : "🟡 待確認"}</strong>：
+            現場 ${t.siteVal || "-"} vs 圖紙 ${t.designVal || "-"} ｜ ${t.desc}
+          </div>
+        `).join("");
+
+        return `
+          <div class="card">
+            <h3 style="margin:0 0 8px 0; font-size:16px;">${p.title}</h3>
+            ${p.sitePhotoUrl ? `
+              <div style="position:relative; border:1px solid #111827; border-radius:4px; overflow:hidden; margin-bottom:8px;">
+                <img src="${p.sitePhotoUrl}" style="width:100%; display:block;" />
+                <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" style="position:absolute; inset:0; width:100%; height:100%;">${linesSvg}</svg>
+                <div style="position:absolute; inset:0;">${labelsHtml}</div>
+              </div>
+            ` : ""}
+            ${dimList}
+            ${auditList}
+          </div>
+        `;
+      }).join("");
+
+      root.innerHTML = `
+        <div class="card" style="border-color:#111827;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h2 style="margin:0; font-size:18px;">${data.projectName}</h2>
+            <span style="font-size:12px; color:#4B5563;">版本：${data.version} · 僅供預覽核對</span>
+          </div>
+        </div>
+        ${pagesHtml}
+      `;
+    }
+    loadPreview();
+  </script>
+</body>
+</html>
