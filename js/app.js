@@ -18,9 +18,21 @@ let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
 let filterReviewOnly = false;
+let showArchivedInCloud = false;
 let folderCoverIndex = {};
 let activeCanvasInstance = null;
 const memoryPhotoCache = new Map();
+
+// 將系統品牌標題統一更新為「度尺批改」
+function applyBrandTitle() {
+  document.title = "度尺批改";
+  document.querySelectorAll("header, nav, .navbar, .topbar, h1, a, span, strong, div").forEach(el => {
+    if (el.children.length === 0 && el.textContent && el.textContent.trim() === "MEASURING") {
+      el.textContent = "度尺批改";
+    }
+  });
+}
+applyBrandTitle();
 
 const DOC_TYPE_LABELS = {
   plan: "平面圖",
@@ -64,6 +76,26 @@ function countProjectAnnotations(proj) {
   return total;
 }
 
+function formatUpdatedTime(ts) {
+  if (!ts) return "未記錄時間";
+  const d = new Date(Number(ts));
+  if (Number.isNaN(d.getTime())) return "未記錄時間";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${day} ${hh}:${mm}`;
+}
+
+function parseMapQueryFromTitle(title) {
+  const cleaned = String(title || "")
+    .replace(/\(\d+\)/g, "")
+    .replace(/傢俬圖|尺吋圖|平面圖|度尺/g, "")
+    .trim();
+  return encodeURIComponent(`香港 ${cleaned}`);
+}
+
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -91,13 +123,16 @@ window.addEventListener("beforeunload", (e) => {
 checkBrowserCompatibility();
 
 watchAuth(async () => {
+  applyBrandTitle();
   masterDict = await loadMasterDict();
   renderProjectList();
 }, () => {
+  applyBrandTitle();
   renderLoginView(root);
 });
 
 async function renderProjectList() {
+  applyBrandTitle();
   root.innerHTML = `<div class="card">載入工程清單中...</div>`;
   const snap = await getDocs(collection(db, PROJ_COL));
   const rawProjects = [];
@@ -118,9 +153,13 @@ async function renderProjectList() {
   });
 
   const allUniqueProjects = Array.from(dedupMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const activeCloudProjects = allUniqueProjects.filter(p => p.archived !== true);
+  const archivedCloudProjects = allUniqueProjects.filter(p => p.archived === true);
+
   const hiddenSet = getHiddenIds();
-  const visibleProjects = allUniqueProjects.filter(p => !hiddenSet.has(p.id));
-  const hiddenCount = allUniqueProjects.filter(p => hiddenSet.has(p.id)).length;
+  const visibleProjects = activeCloudProjects.filter(p => !hiddenSet.has(p.id));
+  const cloudDisplayList = showArchivedInCloud ? allUniqueProjects : activeCloudProjects;
+  const nowTs = Date.now();
 
   root.innerHTML = `
     <div class="card" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
@@ -128,41 +167,61 @@ async function renderProjectList() {
              style="flex:1; min-width:180px; padding:6px 8px; border:1px solid #111827; border-radius:4px; font-size:14px;" />
       <button id="btn-create-proj" class="btn-solid">+ 建立工程</button>
       <button id="btn-load-cloud-proj" class="btn-outline" style="color:#1D4ED8; border-color:#93C5FD; font-weight:700;">
-        📂 Load 工程 (${allUniqueProjects.length}${hiddenCount > 0 ? ` · 含${hiddenCount}已移除` : ""})
+        📂 Load 工程 (${activeCloudProjects.length})
       </button>
       <button id="btn-db-cleaner" class="btn-outline" style="color:#475569;">🧹 資料庫清理</button>
     </div>
 
-    <!-- 雲端全部工程庫面板（Load 工程） -->
+    <!-- 雲端工程庫面板（預設只顯示未完工工程） -->
     <div id="load-cloud-box" class="card hidden" style="background:#EFF6FF; border:1.5px solid #3B82F6;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <strong style="font-size:13px; color:#1E3A8A;">📂 雲端工程庫（全部 ${allUniqueProjects.length} 個工程 · 可載入或恢復至本機清單）</strong>
-        <button id="btn-close-load-box" class="btn-outline btn-sm">關閉</button>
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
+        <strong style="font-size:13px; color:#1E3A8A;">
+          📂 雲端工程庫（${showArchivedInCloud ? `全部 ${allUniqueProjects.length} 個工程` : `未完工 ${activeCloudProjects.length} 個工程`}）
+        </strong>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <label style="font-size:11px; color:#334155; display:flex; align-items:center; gap:4px; cursor:pointer;">
+            <input type="checkbox" id="chk-show-archived" ${showArchivedInCloud ? "checked" : ""} />
+            顯示已完工封存 (${archivedCloudProjects.length})
+          </label>
+          <button id="btn-close-load-box" class="btn-outline btn-sm">關閉</button>
+        </div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:5px; max-height:320px; overflow-y:auto;">
-        ${allUniqueProjects.map(p => {
+      <div style="display:flex; flex-direction:column; gap:5px; max-height:340px; overflow-y:auto;">
+        ${cloudDisplayList.map(p => {
           const isHidden = hiddenSet.has(p.id);
+          const isArchived = p.archived === true;
+          const isRecent = p.updatedAt && (nowTs - Number(p.updatedAt) < 24 * 3600 * 1000);
+          const isNewBadge = !isArchived && (isHidden || isRecent);
           const annCnt = countProjectAnnotations(p);
           return `
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 9px; background:#FFF; border:1px solid ${isHidden ? "#CBD5E1" : "#BFDBFE"}; border-radius:6px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 9px; background:#FFF; border:1px solid ${isArchived ? "#CBD5E1" : "#BFDBFE"}; border-radius:6px; ${isArchived ? "opacity:0.78;" : ""}">
               <div style="flex:1;">
-                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
                   <strong style="font-size:13px; color:#0F172A;">${p.name}</strong>
-                  ${isHidden ? `<span style="font-size:10px; background:#F1F5F9; color:#64748B; padding:1px 5px; border-radius:4px; border:1px solid #CBD5E1;">已從本機清單移除</span>` : `<span style="font-size:10px; background:#DBEAFE; color:#1D4ED8; padding:1px 5px; border-radius:4px;">顯示中</span>`}
+                  ${isNewBadge ? `<span style="font-size:10px; background:#FEF08A; color:#854D0E; font-weight:800; padding:1px 5px; border-radius:4px; border:1px solid #FACC15;">🆕 新</span>` : ""}
+                  ${isArchived
+                    ? `<span style="font-size:10px; background:#DCFCE7; color:#166534; font-weight:700; padding:1px 5px; border-radius:4px;">✅ 已完工封存</span>`
+                    : (isHidden
+                        ? `<span style="font-size:10px; background:#F1F5F9; color:#64748B; padding:1px 5px; border-radius:4px; border:1px solid #CBD5E1;">未在首頁清單</span>`
+                        : `<span style="font-size:10px; background:#DBEAFE; color:#1D4ED8; padding:1px 5px; border-radius:4px;">進行中</span>`)}
                 </div>
-                <div style="font-size:11px; color:#64748B;">ID：${p.id} · 共 ${(p.pages || []).length} 頁 · 📐 ${annCnt} 處標註</div>
+                <div style="font-size:11px; color:#64748B; margin-top:2px;">
+                  🕒 更新：${formatUpdatedTime(p.updatedAt)} · 共 ${(p.pages || []).length} 頁 · 📐 ${annCnt} 處標註
+                </div>
               </div>
-              <div style="display:flex; gap:5px;">
-                ${isHidden ? `<button class="btn-outline btn-sm cloud-restore-btn" data-cid="${p.id}" style="color:#059669; border-color:#6EE7B7;">↩ 放回清單</button>` : ""}
+              <div style="display:flex; gap:5px; align-items:center;">
+                ${isArchived
+                  ? `<button class="btn-outline btn-sm cloud-unarchive-btn" data-cid="${p.id}" style="color:#D97706; border-color:#FCD34D;">↩ 解除封存</button>`
+                  : (isHidden ? `<button class="btn-outline btn-sm cloud-restore-btn" data-cid="${p.id}" style="color:#059669; border-color:#6EE7B7;">↩ 放回首頁</button>` : "")}
                 <button class="btn-solid btn-sm cloud-open-btn" data-cid="${p.id}">載入開啟</button>
               </div>
             </div>
           `;
-        }).join("")}
+        }).join("") || `<div style="color:#64748B; font-size:12px; padding:8px;">目前沒有符合條件的雲端工程。</div>`}
       </div>
     </div>
 
-    <!-- 後台資料庫清潔面板（支援查看明細與逐項勾選） -->
+    <!-- 後台資料庫清潔面板 -->
     <div id="db-cleaner-box" class="card hidden" style="background:#F8FAFC; border:1.5px solid #475569;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
         <strong style="font-size:13px; color:#0F172A;">🧹 後台資料庫清潔（重複副本 / 零碎空工程 / 孤兒底圖）</strong>
@@ -171,28 +230,36 @@ async function renderProjectList() {
       <div id="cleaner-body" style="font-size:12px; color:#334155;">正在掃描雲端資料庫...</div>
     </div>
 
+    <!-- 首頁常用進行中工程列表 -->
     <div id="proj-cards">
       ${visibleProjects.map(p => {
         const pendingReviews = (p.pages || []).reduce((acc, pg) => {
           const list = Array.isArray(pg.reviewLogs) ? pg.reviewLogs : [];
           return acc + list.filter(r => r.status === "PENDING").length;
         }, 0);
+        const mapUrl = `https://www.google.com/maps/search/?api=1&query=${parseMapQueryFromTitle(p.name)}`;
         return `
-          <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-            <div style="flex:1; cursor:pointer;" data-id="${p.id}">
+          <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div style="flex:1; min-width:190px; cursor:pointer;" data-id="${p.id}">
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <strong style="font-size:15px;">${p.name}</strong>
                 ${pendingReviews > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#DC2626; font-weight:700; padding:1px 6px; border-radius:4px;">🔴 ${pendingReviews}項待改</span>` : ""}
               </div>
-              <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
+              <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙 · 更新於 ${formatUpdatedTime(p.updatedAt)}</div>
             </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;" data-hide-id="${p.id}">📦 從本機清單移除</button>
+            <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+              <a href="${mapUrl}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm"
+                 style="text-decoration:none; color:#0284C7; border-color:#BAE6FD; font-weight:700;"
+                 title="在 Google Maps 開啟屋苑位置">🗺️ Map</a>
+              <button class="btn-outline btn-sm" style="color:#059669; border-color:#A7F3D0; font-weight:700;"
+                      data-archive-id="${p.id}" title="標記為已完工並自動封存">✅ 完工封存</button>
+              <button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;"
+                      data-hide-id="${p.id}" title="從本機首頁清單移除">📦 移除</button>
               <button class="btn-outline btn-sm" data-id="${p.id}">進入空間圖集 →</button>
             </div>
           </div>
         `;
-      }).join("") || `<div class="card" style="color:#6B7280;">目前本機清單沒有顯示中的工程，可點擊上方「📂 Load 工程」載入雲端工程或建立新工程。</div>`}
+      }).join("") || `<div class="card" style="color:#6B7280;">目前首頁沒有進行中的工程，可點擊上方「📂 Load 工程」載入雲端工程或建立新工程。</div>`}
     </div>
   `;
 
@@ -200,7 +267,7 @@ async function renderProjectList() {
     const name = document.getElementById("new-proj-name").value.trim();
     if (!name) return;
     const id = "P_" + Date.now();
-    const newProj = { id, name, pages: [], updatedAt: Date.now() };
+    const newProj = { id, name, pages: [], archived: false, updatedAt: Date.now() };
     await setDoc(doc(db, PROJ_COL, id), newProj);
     openProject(newProj);
   };
@@ -212,12 +279,38 @@ async function renderProjectList() {
     document.getElementById("load-cloud-box").classList.add("hidden");
   };
 
+  document.getElementById("chk-show-archived").onchange = (e) => {
+    showArchivedInCloud = e.target.checked;
+    renderProjectList().then(() => {
+      document.getElementById("load-cloud-box")?.classList.remove("hidden");
+    });
+  };
+
   root.querySelectorAll(".cloud-restore-btn").forEach(btn => {
     btn.onclick = () => {
       const s = getHiddenIds();
       s.delete(btn.dataset.cid);
       saveHiddenIds(s);
-      renderProjectList();
+      renderProjectList().then(() => {
+        document.getElementById("load-cloud-box")?.classList.remove("hidden");
+      });
+    };
+  });
+
+  root.querySelectorAll(".cloud-unarchive-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const target = allUniqueProjects.find(p => p.id === btn.dataset.cid);
+      if (!target) return;
+      target.archived = false;
+      target.updatedAt = Date.now();
+      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
+      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
+      const s = getHiddenIds();
+      s.delete(target.id);
+      saveHiddenIds(s);
+      renderProjectList().then(() => {
+        document.getElementById("load-cloud-box")?.classList.remove("hidden");
+      });
     };
   });
 
@@ -235,6 +328,20 @@ async function renderProjectList() {
   document.getElementById("btn-close-cleaner").onclick = () => {
     document.getElementById("db-cleaner-box").classList.add("hidden");
   };
+
+  root.querySelectorAll("[data-archive-id]").forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const target = allUniqueProjects.find(p => p.id === btn.dataset.archiveId);
+      if (!target) return;
+      if (!confirm(`確定將「${target.name}」標記為完工封存並從首頁收起嗎？\n（之後隨時可在「📂 Load 工程」勾選顯示已完工封存查看）`)) return;
+      target.archived = true;
+      target.archivedAt = Date.now();
+      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
+      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
+      renderProjectList();
+    };
+  });
 
   root.querySelectorAll("[data-hide-id]").forEach(btn => {
     btn.onclick = (e) => {
@@ -265,7 +372,6 @@ async function openDatabaseCleaner(rawProjects) {
     const allMediaDocs = [];
     mediaSnap.forEach(d => allMediaDocs.push({ id: d.id, ...d.data() }));
 
-    // 1. 找出重複工程副本
     const groups = new Map();
     rawProjects.forEach(p => {
       const key = p.legacySourceId ? `SRC_${p.legacySourceId}` : `NAME_${(p.name || "").trim()}`;
@@ -281,7 +387,6 @@ async function openDatabaseCleaner(rawProjects) {
       for (let i = 1; i < list.length; i++) duplicateProjs.push({ ...list[i], _keptName: list[0].name, _keptId: list[0].id });
     });
 
-    // 2. 找出零碎空工程
     const emptyProjs = keptProjs.filter(p => {
       const pages = p.pages || [];
       if (pages.length === 0) return true;
@@ -289,7 +394,6 @@ async function openDatabaseCleaner(rawProjects) {
       return !hasAnyContent;
     });
 
-    // 3. 找出孤兒底圖（沒有任何保留工程引用的 mediaRefId）
     const validMediaSet = new Set();
     keptProjs.forEach(p => {
       (p.pages || []).forEach(pg => {
@@ -305,7 +409,6 @@ async function openDatabaseCleaner(rawProjects) {
 
     body.innerHTML = `
       <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
-        <!-- 類別 1：重複多餘工程副本 -->
         <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <span>• 重複多餘工程副本：<strong>${duplicateProjs.length}</strong> 筆（保留標註最多的一份）</span>
@@ -321,7 +424,6 @@ async function openDatabaseCleaner(rawProjects) {
           </div>
         </div>
 
-        <!-- 類別 2：零碎無內容空工程 -->
         <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <span>• 零碎無內容空工程：<strong>${emptyProjs.length}</strong> 筆</span>
@@ -337,7 +439,6 @@ async function openDatabaseCleaner(rawProjects) {
           </div>
         </div>
 
-        <!-- 類別 3：無人引用的孤兒圖片（附縮圖預覽） -->
         <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <span>• 無人引用的孤兒圖片：<strong>${orphanMediaDocs.length}</strong> 張</span>
@@ -549,6 +650,7 @@ function renderOverview() {
       <div style="display:flex; align-items:center; gap:6px;">
         <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
         <strong style="font-size:15px;">${currentProject.name}</strong>
+        ${currentProject.archived ? `<span style="font-size:11px; background:#DCFCE7; color:#166534; font-weight:700; padding:1px 6px; border-radius:4px;">✅ 已完工封存</span>` : ""}
       </div>
       <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
         <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#EF4444; color:#DC2626; font-weight:700;">
@@ -977,13 +1079,14 @@ function renderSinglePageEditor(page) {
           </button>
           <strong style="font-size:14px; color:#F9FAFB;">${pageTitleText}</strong>
           <span style="font-size:12px; color:#9CA3AF;">(${activePageIdx + 1}/${totalPages})</span>
-          <button id="btn-toggle-white-bg" title="切換白底批改草圖畫布"
-                  style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:3px 9px; font-size:12px; font-weight:800; cursor:pointer;">
-            📄 白底
-          </button>
         </div>
 
+        <!-- 右側集中操作按鈕：📄 白底 已移至 📝 批改記錄 左側 -->
         <div style="display:flex; align-items:center; gap:6px;">
+          <button id="btn-toggle-white-bg" title="切換白底批改草圖畫布"
+                  style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
+            📄 白底
+          </button>
           <button id="btn-page-review-drawer" style="background:#7F1D1D; color:#FECACA; border:1px solid #EF4444; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer;">
             📝 批改記錄 (${page.reviewLogs.length})
           </button>
