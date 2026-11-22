@@ -29,11 +29,23 @@ async function renderProjectList() {
   projects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   root.innerHTML = `
-    <div class="card" style="display:flex; gap:8px;">
-      <input type="text" id="new-proj-name" placeholder="輸入新工程名稱（如：擎天半島 5-36G）"
-             style="flex:1; padding:8px; border:1px solid #111827; border-radius:4px; font-size:15px;" />
+    <div class="card" style="display:flex; flex-wrap:wrap; gap:8px;">
+      <input type="text" id="new-proj-name" placeholder="輸入新工程名稱"
+             style="flex:1; min-width:180px; padding:8px; border:1px solid #111827; border-radius:4px; font-size:15px;" />
       <button id="btn-create-proj" class="btn-solid">+ 建立工程</button>
+      <button id="btn-import-legacy" class="btn-outline">📂 匯入舊系統工程</button>
     </div>
+
+    <div id="legacy-import-box" class="card hidden" style="background:#F9FAFB; border:1px solid #111827;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <strong style="font-size:14px;">從舊系統（site_projects）唯讀匯入工程</strong>
+        <button id="btn-close-legacy" class="btn-outline btn-sm">關閉</button>
+      </div>
+      <div id="legacy-list" style="display:flex; flex-direction:column; gap:6px; font-size:13px; color:#4B5563;">
+        點擊上方按鈕載入舊系統清單...
+      </div>
+    </div>
+
     <div id="proj-cards">
       ${projects.map(p => `
         <div class="card" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" data-id="${p.id}">
@@ -43,7 +55,7 @@ async function renderProjectList() {
           </div>
           <span class="btn-outline btn-sm">進入度尺 →</span>
         </div>
-      `).join("") || `<div class="card" style="color:#6B7280;">尚未建立工程，請在上方輸入單位名稱開始。</div>`}
+      `).join("") || `<div class="card" style="color:#6B7280;">尚未建立工程，請在上方輸入名稱建立，或點擊「📂 匯入舊系統工程」。</div>`}
     </div>
   `;
 
@@ -56,10 +68,100 @@ async function renderProjectList() {
     openProject(newProj);
   };
 
+  document.getElementById("btn-import-legacy").onclick = openLegacyImporter;
+  document.getElementById("btn-close-legacy").onclick = () => {
+    document.getElementById("legacy-import-box").classList.add("hidden");
+  };
+
   root.querySelectorAll("[data-id]").forEach(card => {
     card.onclick = () => {
       const found = projects.find(p => p.id === card.dataset.id);
       if (found) openProject(found);
+    };
+  });
+}
+
+async function openLegacyImporter() {
+  const box = document.getElementById("legacy-import-box");
+  const listEl = document.getElementById("legacy-list");
+  box.classList.remove("hidden");
+  listEl.innerHTML = `正在讀取舊系統工程清單...`;
+
+  const snap = await getDocs(collection(db, "site_projects"));
+  const legacyItems = [];
+  snap.forEach(d => legacyItems.push({ docId: d.id, ...d.data() }));
+  legacyItems.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
+  if (!legacyItems.length) {
+    listEl.innerHTML = `舊系統目前沒有工程資料。`;
+    return;
+  }
+
+  listEl.innerHTML = legacyItems.map((item, idx) => {
+    const title = (item.name || item.title || "未命名工程").trim();
+    const code = item.code || item.docId;
+    const dateStr = item.date ? ` · ${item.date}` : "";
+    return `
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; background:#FFF; border:1px solid #D1D5DB; border-radius:4px;">
+        <div>
+          <div style="font-weight:700; color:#111827;">${title}</div>
+          <div style="font-size:12px; color:#6B7280;">編號：${code}${dateStr}</div>
+        </div>
+        <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入此工程</button>
+      </div>
+    `;
+  }).join("");
+
+  listEl.querySelectorAll(".legacy-do-import").forEach(btn => {
+    btn.onclick = async () => {
+      const target = legacyItems[Number(btn.dataset.idx)];
+      btn.disabled = true;
+      btn.textContent = "匯入中...";
+
+      const mediaSnap = await getDocs(collection(db, "site_projects", target.docId, "media"));
+      const mediaList = [];
+      mediaSnap.forEach(m => mediaList.push({ id: m.id, ...m.data() }));
+
+      const oldPages = Array.isArray(target.pages) ? target.pages : [];
+      let convertedPages = [];
+
+      if (oldPages.length > 0) {
+        convertedPages = oldPages.map((op, i) => {
+          const matchedMedia = mediaList.find(m => m.pageId === op.id || m.id === op.mediaId) || mediaList[i];
+          const imgUrl = op.sitePhotoUrl || op.imageUrl || op.url || (matchedMedia && (matchedMedia.imageData || matchedMedia.dataUrl || matchedMedia.url)) || "";
+          return {
+            id: "PG_" + Date.now() + "_" + i,
+            title: op.title || op.name || `分頁 ${i + 1}`,
+            sitePhotoUrl: imgUrl,
+            designPhotoUrl: op.designPhotoUrl || "",
+            lines: Array.isArray(op.lines) ? op.lines : [],
+            auditTickets: []
+          };
+        });
+      } else if (mediaList.length > 0) {
+        convertedPages = mediaList.map((m, i) => ({
+          id: "PG_" + Date.now() + "_" + i,
+          title: m.title || m.name || `舊圖 ${i + 1}`,
+          sitePhotoUrl: m.imageData || m.dataUrl || m.url || m.src || "",
+          designPhotoUrl: "",
+          lines: Array.isArray(m.lines) ? m.lines : [],
+          auditTickets: []
+        }));
+      }
+
+      const newId = "P_" + Date.now();
+      const baseName = (target.name || target.title || "未命名工程").trim();
+      const codeTag = target.code ? ` (${target.code})` : "";
+      const newProj = {
+        id: newId,
+        name: baseName + codeTag,
+        legacySourceId: target.docId,
+        pages: convertedPages,
+        updatedAt: Date.now()
+      };
+
+      await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), newProj);
+      openProject(newProj);
     };
   });
 }
