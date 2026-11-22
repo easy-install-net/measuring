@@ -10,9 +10,11 @@ import { renderReportBuilder } from "./modules/report-builder.js";
 const root = document.getElementById("app-root");
 let masterDict = null;
 let currentProject = null;
-let activePageIdx = -1; // -1 = 空間總覽網格, >= 0 = 進入單頁度尺/審圖
+let activePageIdx = -1; // -1 = 總覽, >= 0 = 單頁度尺/審圖
+let viewMode = "FOLDER"; // "FOLDER" = 空間資料夾卡片模式, "EXPANDED" = 空間展開全圖模式
 let filterSpace = "ALL";
 let filterDocType = "ALL";
+let folderCoverIndex = {}; // 記錄每個空間資料夾目前預覽第幾張圖
 
 const DOC_TYPE_LABELS = {
   plan: "平面圖",
@@ -64,7 +66,7 @@ async function renderProjectList() {
             <div style="font-weight:700; font-size:16px;">${p.name}</div>
             <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
           </div>
-          <span class="btn-outline btn-sm">進入空間總覽 →</span>
+          <span class="btn-outline btn-sm">進入空間圖集 →</span>
         </div>
       `).join("") || `<div class="card" style="color:#6B7280;">尚未建立工程，請在上方輸入名稱建立，或點擊「📂 匯入舊系統工程」。</div>`}
     </div>
@@ -92,7 +94,6 @@ async function renderProjectList() {
   });
 }
 
-// 萬用切片還原：自動拼接 media/{imgId}/chunks 內所有字串切片
 async function reconstructChunkedImage(projectId, mediaId, mediaMeta) {
   if (!mediaId) return "";
   if (mediaMeta) {
@@ -149,7 +150,7 @@ async function openLegacyImporter() {
           <div style="font-weight:700; color:#111827;">${title}</div>
           <div style="font-size:12px; color:#6B7280;">編號：${code}${dateStr}</div>
         </div>
-        <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入並還原圖紙</button>
+        <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入並還原圖集</button>
       </div>
     `;
   }).join("");
@@ -238,8 +239,10 @@ async function openLegacyImporter() {
 function openProject(proj) {
   currentProject = proj;
   activePageIdx = -1;
+  viewMode = "FOLDER";
   filterSpace = "ALL";
   filterDocType = "ALL";
+  folderCoverIndex = {};
   renderWorkspace();
 }
 
@@ -253,11 +256,10 @@ function renderWorkspace() {
     renderSinglePageEditor(currentProject.pages[activePageIdx]);
     return;
   }
-  renderSpatialGridOverview();
+  renderOverview();
 }
 
-// 空間獨立分區 ＋ 雙層篩選 ＋ 三欄縮圖網格總覽（對齊舊系統佈局）
-function renderSpatialGridOverview() {
+function renderOverview() {
   const pages = currentProject.pages || [];
   const allSpaces = [...new Set(pages.map(p => p.space || "未分類空間"))];
 
@@ -274,7 +276,6 @@ function renderSpatialGridOverview() {
     return spOk && tpOk;
   });
 
-  // 依空間分組
   const groups = {};
   filteredPages.forEach(p => {
     const sp = p.space || "未分類空間";
@@ -283,21 +284,25 @@ function renderSpatialGridOverview() {
   });
 
   root.innerHTML = `
+    <!-- 頂部工具列 -->
     <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
       <div style="display:flex; align-items:center; gap:8px;">
-        <button id="btn-back-list" class="btn-outline btn-sm">← 目錄</button>
+        <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
         <strong style="font-size:16px;">${currentProject.name}</strong>
-        <span style="font-size:12px; color:#6B7280;">(${filteredPages.length}/${pages.length}頁)</span>
       </div>
-      <div style="display:flex; gap:6px;">
-        <button id="btn-add-space" class="btn-outline btn-sm">+ 新增空間/圖紙</button>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <button id="btn-add-space" class="btn-outline btn-sm">+ 空間</button>
         <button id="btn-open-report" class="btn-solid btn-sm">報告與客戶預覽</button>
       </div>
     </div>
 
-    <!-- 雙層篩選列 -->
+    <!-- 雙層篩選 + 檢視模式切換列 -->
     <div class="card" style="padding:10px; margin-bottom:10px;">
       <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #E5E7EB;">
+        <span style="font-size:12px; color:#6B7280; margin-right:2px;">${filteredPages.length}/${pages.length}頁</span>
+        <button id="btn-mode-folder" class="chip ${viewMode === "FOLDER" ? "active" : ""}">🗂️ 圖集</button>
+        <button id="btn-mode-expanded" class="chip ${viewMode === "EXPANDED" ? "active" : ""}">⊞ 展開</button>
+        <span style="color:#D1D5DB;">|</span>
         <button class="chip ${filterSpace === "ALL" ? "active" : ""}" data-fsp="ALL">全部空間</button>
         ${allSpaces.map(sp => `
           <button class="chip ${filterSpace === sp ? "active" : ""}" data-fsp="${sp}">${sp}</button>
@@ -315,7 +320,7 @@ function renderSpatialGridOverview() {
     <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}">
       <div class="section-title">第一步：選擇空間</div>
       <div class="chip-grid" id="picker-spaces" style="margin-bottom:10px;"></div>
-      <div class="section-title">第二步：選擇訂造櫃體 / 圖紙類型（選填）</div>
+      <div class="section-title">第二步：選擇訂造櫃體（選填）</div>
       <div class="chip-grid" id="picker-cabs" style="margin-bottom:12px;"></div>
       <div style="display:flex; gap:8px;">
         <input type="text" id="custom-page-title" placeholder="空間名稱（如：玄關、主人房）" style="flex:1; padding:7px; border:1px solid #111827; border-radius:4px;" />
@@ -331,20 +336,141 @@ function renderSpatialGridOverview() {
       </div>
     </div>
 
-    <!-- 空間獨立分區區塊 + 三欄縮圖網格 -->
-    <div id="spatial-sections" style="display:flex; flex-direction:column; gap:14px;">
+    <!-- 主內容區：圖集資料夾模式 vs 展開全圖模式 -->
+    <div id="main-gallery-host"></div>
+  `;
+
+  document.getElementById("btn-back-list").onclick = renderProjectList;
+  document.getElementById("btn-add-space").onclick = () => document.getElementById("dict-picker-box").classList.toggle("hidden");
+  document.getElementById("btn-open-report").onclick = () => renderReportBuilder(root, currentProject, renderWorkspace);
+
+  document.getElementById("btn-mode-folder").onclick = () => { viewMode = "FOLDER"; renderOverview(); };
+  document.getElementById("btn-mode-expanded").onclick = () => { viewMode = "EXPANDED"; renderOverview(); };
+
+  root.querySelectorAll("[data-fsp]").forEach(btn => {
+    btn.onclick = () => {
+      filterSpace = btn.dataset.fsp;
+      if (filterSpace !== "ALL") viewMode = "EXPANDED";
+      renderOverview();
+    };
+  });
+  root.querySelectorAll("[data-ftp]").forEach(btn => {
+    btn.onclick = () => { filterDocType = btn.dataset.ftp; renderOverview(); };
+  });
+
+  setupDictPicker();
+
+  const galleryHost = document.getElementById("main-gallery-host");
+  if (viewMode === "FOLDER" && filterSpace === "ALL") {
+    renderFolderGrid(galleryHost, groups, pages);
+  } else {
+    renderExpandedSections(galleryHost, groups, pages);
+  }
+}
+
+// 圖集模式：每個空間一張大資料夾卡片（標題+張數 / 主封面預覽 / 底部4張迷你縮圖 +N + 展開>）
+function renderFolderGrid(host, groups, allPages) {
+  host.innerHTML = `
+    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px;">
+      ${Object.entries(groups).map(([spaceName, items]) => {
+        const activeSubIdx = Math.min(folderCoverIndex[spaceName] || 0, items.length - 1);
+        const coverPage = items[activeSubIdx];
+        const coverType = coverPage.docTypeLabel || DOC_TYPE_LABELS[coverPage.docType] || "拍攝";
+        const previewThumbs = items.slice(0, 4);
+        const extraCount = items.length - 4;
+
+        return `
+          <div class="space-folder-card" data-folder-space="${spaceName}"
+               style="background:#FFF; border:1px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+            <!-- 卡片頂部：空間名 + 張數 -->
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#F8FAFC; border-bottom:1px solid #E2E8F0;">
+              <strong style="font-size:15px; color:#1E293B;">${spaceName}</strong>
+              <span style="font-size:12px; color:#64748B;">${items.length}張</span>
+            </div>
+
+            <!-- 當前預覽類型標記 -->
+            <div style="padding:4px 12px 0 12px; font-size:12px; color:#64748B;">
+              ${coverType}
+            </div>
+
+            <!-- 中央主封面預覽圖（點擊直接進入該圖度尺） -->
+            <div class="folder-main-preview" data-open-page="${allPages.indexOf(coverPage)}"
+                 style="height:185px; margin:6px 12px; background:#F1F5F9; border-radius:4px; display:flex; align-items:center; justify-content:center; cursor:pointer; overflow:hidden;">
+              ${coverPage.sitePhotoUrl
+                ? `<img src="${coverPage.sitePhotoUrl}" style="width:100%; height:100%; object-fit:contain;" />`
+                : `<span style="color:#94A3B8; font-size:12px;">尚未上傳圖紙</span>`}
+            </div>
+
+            <!-- 底部迷你縮圖條 +N + 展開 > -->
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; border-top:1px solid #F1F5F9; background:#FAFAFA;">
+              <div style="display:flex; align-items:center; gap:4px;">
+                ${previewThumbs.map((tp, tIdx) => `
+                  <div class="mini-thumb-btn" data-thumb-space="${spaceName}" data-thumb-idx="${tIdx}"
+                       style="width:32px; height:32px; border-radius:3px; overflow:hidden; cursor:pointer; border:${tIdx === activeSubIdx ? "2px solid #2563EB" : "1px solid #CBD5E1"}; background:#FFF;">
+                    ${tp.sitePhotoUrl
+                      ? `<img src="${tp.sitePhotoUrl}" style="width:100%; height:100%; object-fit:cover;" />`
+                      : `<div style="width:100%; height:100%; background:#E2E8F0;"></div>`}
+                  </div>
+                `).join("")}
+                ${extraCount > 0 ? `<span style="font-size:12px; color:#64748B; margin-left:2px;">+${extraCount}</span>` : ""}
+              </div>
+              <button class="folder-expand-btn" data-expand-space="${spaceName}"
+                      style="background:none; border:none; color:#4F46E5; font-size:12px; font-weight:600; cursor:pointer; padding:4px;">
+                展開 ›
+              </button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+
+  // 點擊迷你小縮圖切換主預覽
+  host.querySelectorAll(".mini-thumb-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      folderCoverIndex[btn.dataset.thumbSpace] = Number(btn.dataset.thumbIdx);
+      renderOverview();
+    };
+  });
+
+  // 點擊「展開 ›」篩選並展開該空間所有圖紙
+  host.querySelectorAll(".folder-expand-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      filterSpace = btn.dataset.expandSpace;
+      viewMode = "EXPANDED";
+      renderOverview();
+    };
+  });
+
+  // 點擊中央主封面圖直接進入該頁度尺/審圖
+  host.querySelectorAll(".folder-main-preview").forEach(box => {
+    box.onclick = () => {
+      activePageIdx = Number(box.dataset.openPage);
+      renderWorkspace();
+    };
+  });
+}
+
+// 展開模式：依空間分區框顯示所有單頁縮圖卡片
+function renderExpandedSections(host, groups, allPages) {
+  host.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:14px;">
       ${Object.entries(groups).map(([spaceName, items]) => `
         <div style="background:#F8FAFC; border:1.5px solid #CBD5E1; border-radius:8px; padding:12px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
             <div style="font-weight:700; font-size:15px; color:#1E293B;">
               📁 ${spaceName} <span style="font-weight:400; color:#64748B; font-size:13px;">(${items.length} 頁)</span>
             </div>
-            <span style="font-size:11px; color:#64748B; background:#E2E8F0; padding:2px 8px; border-radius:4px;">獨立空間分區</span>
+            ${filterSpace !== "ALL"
+              ? `<button class="btn-outline btn-sm btn-back-all-folders">‹ 返回全部圖集</button>`
+              : `<span style="font-size:11px; color:#64748B; background:#E2E8F0; padding:2px 8px; border-radius:4px;">獨立空間分區</span>`}
           </div>
 
           <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:10px;">
             ${items.map(p => {
-              const realIdx = pages.indexOf(p);
+              const realIdx = allPages.indexOf(p);
               const pNum = p.pageNum || `P${realIdx + 1}`;
               const tLbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
               const count = (p.lines || []).length + (p.pins || []).length;
@@ -378,21 +504,12 @@ function renderSpatialGridOverview() {
     </div>
   `;
 
-  document.getElementById("btn-back-list").onclick = renderProjectList;
-  document.getElementById("btn-add-space").onclick = () => document.getElementById("dict-picker-box").classList.toggle("hidden");
-  document.getElementById("btn-open-report").onclick = () => renderReportBuilder(root, currentProject, renderWorkspace);
-
-  root.querySelectorAll("[data-fsp]").forEach(btn => {
-    btn.onclick = () => { filterSpace = btn.dataset.fsp; renderSpatialGridOverview(); };
+  host.querySelectorAll(".btn-back-all-folders").forEach(btn => {
+    btn.onclick = () => { filterSpace = "ALL"; viewMode = "FOLDER"; renderOverview(); };
   });
-  root.querySelectorAll("[data-ftp]").forEach(btn => {
-    btn.onclick = () => { filterDocType = btn.dataset.ftp; renderSpatialGridOverview(); };
-  });
-  root.querySelectorAll("[data-open-idx]").forEach(card => {
+  host.querySelectorAll("[data-open-idx]").forEach(card => {
     card.onclick = () => { activePageIdx = Number(card.dataset.openIdx); renderWorkspace(); };
   });
-
-  setupDictPicker();
 }
 
 function setupDictPicker() {
@@ -456,7 +573,7 @@ function renderSinglePageEditor(page) {
   root.innerHTML = `
     <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
       <div style="display:flex; align-items:center; gap:8px;">
-        <button id="btn-back-grid" class="btn-outline btn-sm">← 返回空間總覽</button>
+        <button id="btn-back-grid" class="btn-outline btn-sm">‹ 返回空間圖集</button>
         <strong style="font-size:15px;">${page.pageNum || ""} ${page.space || ""} · ${page.docTypeLabel || ""}</strong>
       </div>
       <div style="display:flex; gap:8px;">
