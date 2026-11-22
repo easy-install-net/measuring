@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { db, COLLECTIONS } from "./config/firebase-init.js";
 import { loadMasterDict } from "./config/master-dict.js";
 import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
@@ -6,6 +6,9 @@ import { uploadMediaToCloud } from "./core/image-upload.js";
 import { MeasureCanvas } from "./modules/measure-canvas.js";
 import { renderAuditSplitView } from "./modules/audit-split.js";
 import { renderReportBuilder } from "./modules/report-builder.js";
+
+const PROJ_COL = (COLLECTIONS && COLLECTIONS.PROJECTS) || "measuring_projects";
+const MEDIA_COL = (COLLECTIONS && COLLECTIONS.MEDIA) || "measuring_media";
 
 const root = document.getElementById("app-root");
 let masterDict = null;
@@ -15,7 +18,7 @@ let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
 let folderCoverIndex = {};
-const memoryPhotoCache = new Map(); // 記憶體快取，瞬間切換圖紙不卡頓
+const memoryPhotoCache = new Map();
 
 const DOC_TYPE_LABELS = {
   plan: "平面圖",
@@ -39,7 +42,7 @@ watchAuth(async () => {
 
 async function renderProjectList() {
   root.innerHTML = `<div class="card">載入工程清單中...</div>`;
-  const snap = await getDocs(collection(db, COLLECTIONS.PROJECTS));
+  const snap = await getDocs(collection(db, PROJ_COL));
   const projects = [];
   snap.forEach(d => projects.push({ id: d.id, ...d.data() }));
   projects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -65,12 +68,15 @@ async function renderProjectList() {
 
     <div id="proj-cards">
       ${projects.map(p => `
-        <div class="card" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" data-id="${p.id}">
-          <div>
+        <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <div style="flex:1; cursor:pointer;" data-id="${p.id}">
             <div style="font-weight:700; font-size:16px;">${p.name}</div>
             <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
           </div>
-          <span class="btn-outline btn-sm">進入空間圖集 →</span>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button class="btn-outline btn-sm" style="color:#DC2626; border-color:#FCA5A5;" data-del-id="${p.id}">🗑️ 刪除</button>
+            <button class="btn-outline btn-sm" data-id="${p.id}">進入空間圖集 →</button>
+          </div>
         </div>
       `).join("") || `<div class="card" style="color:#6B7280;">尚未建立工程，請在上方輸入名稱建立，或點擊「📂 匯入舊系統工程」。</div>`}
     </div>
@@ -81,7 +87,7 @@ async function renderProjectList() {
     if (!name) return;
     const id = "P_" + Date.now();
     const newProj = { id, name, pages: [], updatedAt: Date.now() };
-    await setDoc(doc(db, COLLECTIONS.PROJECTS, id), newProj);
+    await setDoc(doc(db, PROJ_COL, id), newProj);
     openProject(newProj);
   };
 
@@ -90,15 +96,26 @@ async function renderProjectList() {
     document.getElementById("legacy-import-box").classList.add("hidden");
   };
 
-  root.querySelectorAll("[data-id]").forEach(card => {
-    card.onclick = async () => {
-      const found = projects.find(p => p.id === card.dataset.id);
+  root.querySelectorAll("[data-del-id]").forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const delId = btn.dataset.delId;
+      if (!confirm("確定要刪除此工程紀錄嗎？（不會影響舊系統原始資料）")) return;
+      btn.disabled = true;
+      btn.textContent = "刪除中...";
+      await deleteDoc(doc(db, PROJ_COL, delId));
+      renderProjectList();
+    };
+  });
+
+  root.querySelectorAll("[data-id]").forEach(el => {
+    el.onclick = async () => {
+      const found = projects.find(p => p.id === el.dataset.id);
       if (found) await openProjectWithHydration(found);
     };
   });
 }
 
-// 取得分頁圖片：優先從記憶體快取 / 舊系統切片 / 新系統獨立媒體庫載入
 async function hydrateProjectPhotos(proj) {
   const pages = proj.pages || [];
   await Promise.all(pages.map(async (p) => {
@@ -110,10 +127,9 @@ async function hydrateProjectPhotos(proj) {
       p.sitePhotoUrl = memoryPhotoCache.get(p.id);
       return;
     }
-    // 1. 嘗試從新系統獨立媒體表讀取
     if (p.mediaRefId) {
       try {
-        const mDoc = await getDoc(doc(db, COLLECTIONS.MEDIA, p.mediaRefId));
+        const mDoc = await getDoc(doc(db, MEDIA_COL, String(p.mediaRefId)));
         if (mDoc.exists() && mDoc.data().imageData) {
           p.sitePhotoUrl = mDoc.data().imageData;
           memoryPhotoCache.set(p.id, p.sitePhotoUrl);
@@ -121,7 +137,6 @@ async function hydrateProjectPhotos(proj) {
         }
       } catch (_) {}
     }
-    // 2. 若有舊系統來源，直接即時還原切片（保證 100% 不受 1MB 限制）
     if (proj.legacySourceId && p.legacyMediaId) {
       const url = await resolveLegacyMediaPhoto(proj.legacySourceId, p.legacyMediaId, { chunked: true });
       if (url) {
@@ -253,11 +268,10 @@ async function openLegacyImporter() {
             }
             if (!imgUrl && pg.photo) imgUrl = pg.photo;
 
-            // 分拆存入 measuring_media（單張獨立存放，避開 Firestore 1MB 文件上限）
             let mediaRefId = "";
             if (imgUrl && imgUrl.length < 900000) {
               mediaRefId = `${newId}_${pageIdStr}`;
-              await setDoc(doc(db, COLLECTIONS.MEDIA, mediaRefId), {
+              await setDoc(doc(db, MEDIA_COL, mediaRefId), {
                 projectId: newId,
                 pageId: pageIdStr,
                 imageData: imgUrl,
@@ -285,16 +299,14 @@ async function openLegacyImporter() {
               auditTickets: []
             };
 
-            // 寫入 Firestore 總表時不塞入巨大 base64，確保瞬間寫入成功！
             convertedPagesForDb.push({ ...basePageMeta, sitePhotoUrl: "" });
-            // 記憶體內保留完整圖片，立刻秒開圖集！
             convertedPagesForMemory.push({ ...basePageMeta, sitePhotoUrl: imgUrl });
           }
 
           const baseName = (target.name || target.title || "未命名工程").trim();
           const codeTag = target.code ? ` (${target.code})` : "";
 
-          await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), {
+          await setDoc(doc(db, PROJ_COL, newId), {
             id: newId,
             name: baseName + codeTag,
             legacySourceId: String(target.docId),
@@ -335,12 +347,11 @@ function openProject(proj) {
 
 async function saveCurrentProject() {
   currentProject.updatedAt = Date.now();
-  // 儲存總表時把 base64 剝離（避免超過 1MB），圖片全存在記憶體與獨立媒體庫
   const slimPages = (currentProject.pages || []).map(p => {
     if (p.sitePhotoUrl) memoryPhotoCache.set(p.id, p.sitePhotoUrl);
     return { ...p, sitePhotoUrl: "" };
   });
-  await setDoc(doc(db, COLLECTIONS.PROJECTS, currentProject.id), {
+  await setDoc(doc(db, PROJ_COL, currentProject.id), {
     ...currentProject,
     pages: slimPages
   });
