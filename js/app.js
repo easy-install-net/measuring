@@ -11,10 +11,10 @@ const root = document.getElementById("app-root");
 let masterDict = null;
 let currentProject = null;
 let activePageIdx = -1; // -1 = 總覽, >= 0 = 單頁度尺/審圖
-let viewMode = "FOLDER"; // "FOLDER" = 空間資料夾卡片模式, "EXPANDED" = 空間展開全圖模式
+let viewMode = "FOLDER"; // "FOLDER" = 圖集資料夾卡片, "EXPANDED" = 空間展開全圖
 let filterSpace = "ALL";
 let filterDocType = "ALL";
-let folderCoverIndex = {}; // 記錄每個空間資料夾目前預覽第幾張圖
+let folderCoverIndex = {};
 
 const DOC_TYPE_LABELS = {
   plan: "平面圖",
@@ -24,6 +24,8 @@ const DOC_TYPE_LABELS = {
   render: "效果圖",
   dim: "尺吋圖"
 };
+
+const DOC_TYPE_RANK = { plan: 1, photo: 2, "3d": 3, dim: 4, detail: 5, render: 6 };
 
 checkBrowserCompatibility();
 
@@ -94,32 +96,18 @@ async function renderProjectList() {
   });
 }
 
-async function reconstructChunkedImage(projectId, mediaId, mediaMeta) {
-  if (!mediaId) return "";
-  if (mediaMeta) {
-    const direct = mediaMeta.imageData || mediaMeta.dataUrl || mediaMeta.data || mediaMeta.url || mediaMeta.src;
-    if (typeof direct === "string" && direct.length > 100) return direct;
-  }
+// 完全對齊舊系統 resolveMediaDoc 邏輯：優先讀 d.photo，否則按 index 拼接 chunks 裡的 c.data
+async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
+  if (!mediaDocId) return "";
+  if (mediaMeta && mediaMeta.photo) return mediaMeta.photo;
+  if (!mediaMeta || !mediaMeta.chunked) return "";
   try {
-    const chunksSnap = await getDocs(collection(db, "site_projects", projectId, "media", mediaId, "chunks"));
-    const chunkDocs = [];
-    chunksSnap.forEach(c => chunkDocs.push({ id: c.id, ...c.data() }));
-    chunkDocs.sort((a, b) => {
-      const na = Number(a.index ?? a.idx ?? String(a.id).replace(/\D/g, "")) || 0;
-      const nb = Number(b.index ?? b.idx ?? String(b.id).replace(/\D/g, "")) || 0;
-      return na - nb;
-    });
-    let combined = "";
-    for (const cd of chunkDocs) {
-      const strVal = cd.data || cd.chunk || cd.val || cd.content || cd.str ||
-        Object.values(cd).find(v => typeof v === "string" && v.length > 30 && v !== cd.id) || "";
-      combined += strVal;
-    }
-    if (combined && !combined.startsWith("data:image") && !combined.startsWith("http")) {
-      combined = "data:image/jpeg;base64," + combined;
-    }
-    return combined;
-  } catch (e) {
+    const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
+    const list = [];
+    chunksSnap.forEach(c => list.push(c.data()));
+    list.sort((a, b) => (a.index || 0) - (b.index || 0));
+    return list.map(c => c.data || "").join("");
+  } catch (_) {
     return "";
   }
 }
@@ -159,50 +147,72 @@ async function openLegacyImporter() {
     btn.onclick = async () => {
       const target = legacyItems[Number(btn.dataset.idx)];
       btn.disabled = true;
-      btn.textContent = "讀取分頁與切片中...";
+      btn.textContent = "讀取分頁與圖庫中...";
 
       const [pagesSnap, mediaSnap] = await Promise.all([
-        getDocs(collection(db, "site_projects", target.docId, "pages")),
-        getDocs(collection(db, "site_projects", target.docId, "media"))
+        getDocs(collection(db, "site_projects", String(target.docId), "pages")),
+        getDocs(collection(db, "site_projects", String(target.docId), "media"))
       ]);
 
       const rawPagesMap = {};
-      pagesSnap.forEach(d => { rawPagesMap[d.id] = { docId: d.id, ...d.data() }; });
-
-      const mediaMap = {};
-      const mediaList = [];
-      mediaSnap.forEach(m => {
-        const obj = { id: m.id, ...m.data() };
-        mediaMap[m.id] = obj;
-        mediaList.push(obj);
+      pagesSnap.forEach(d => {
+        const data = d.data() || {};
+        rawPagesMap[d.id] = { docId: d.id, ...data };
       });
 
-      const deletedSet = new Set(target.deletedPageIds || []);
+      const mediaMetaMap = new Map();
+      mediaSnap.forEach(m => mediaMetaMap.set(String(m.id), m.data() || {}));
+
+      const deletedSet = new Set((target.deletedPageIds || []).map(String));
       const orderedIds = Array.isArray(target.pageIds) && target.pageIds.length > 0
-        ? target.pageIds.filter(id => rawPagesMap[id] && !deletedSet.has(id))
+        ? target.pageIds.map(String).filter(id => rawPagesMap[id] && !deletedSet.has(id))
         : Object.keys(rawPagesMap).filter(id => !deletedSet.has(id));
+
+      // 加上不在 pageIds 裡但未刪除的頁
+      Object.keys(rawPagesMap).forEach(id => {
+        if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
+      });
+
+      const photoCache = new Map();
+      const getCachedPhoto = async (mId) => {
+        if (!mId) return "";
+        if (photoCache.has(mId)) return photoCache.get(mId);
+        const url = await resolveLegacyMediaPhoto(target.docId, mId, mediaMetaMap.get(mId));
+        photoCache.set(mId, url);
+        return url;
+      };
 
       const convertedPages = [];
       for (let i = 0; i < orderedIds.length; i++) {
         btn.textContent = `還原圖紙 (${i + 1}/${orderedIds.length})...`;
         const pg = rawPagesMap[orderedIds[i]];
-        const spaceName = (pg.space || pg.room || pg.zone || pg.area || pg.category || pg.group || "未分類空間").trim();
+        const pageIdStr = String(pg.id || pg.docId);
+
+        // 完全對齊舊系統空間欄位：pg.space 或 pg.spaces[0]
+        const rawSpace = (Array.isArray(pg.spaces) && pg.spaces[0]) ? pg.spaces[0] : (pg.space || "");
+        const spaceName = String(rawSpace).trim() || "未標空間";
+
         const rawDocType = pg.docType || "photo";
         const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
 
-        let matchedMediaId = pg.mediaId || pg.imgId || pg.imageId || pg.photoId || "";
-        if (!matchedMediaId) {
-          const prefix = String(pg.id || pg.docId).replace(/^pg_/, "img_").split("_").slice(0, 2).join("_");
-          const foundM = mediaList.find(m => m.id.startsWith(prefix)) || mediaList[i];
-          if (foundM) matchedMediaId = foundM.id;
+        // 完全對齊舊系統圖片索引：pg.photoId 優先，否則 'page_' + pg.id
+        let imgUrl = "";
+        if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) {
+          imgUrl = await getCachedPhoto(String(pg.photoId));
+        }
+        if (!imgUrl && mediaMetaMap.has("page_" + pageIdStr)) {
+          imgUrl = await getCachedPhoto("page_" + pageIdStr);
+        }
+        if (!imgUrl && pg.photo) {
+          imgUrl = pg.photo;
         }
 
-        const imgUrl = await reconstructChunkedImage(target.docId, matchedMediaId, mediaMap[matchedMediaId]);
         const oldLines = Array.isArray(pg.lines) ? pg.lines : [];
+        const oldMarkers = Array.isArray(pg.markers) ? pg.markers : [];
         const oldPins = Array.isArray(pg.pins) ? pg.pins : [];
 
         convertedPages.push({
-          id: pg.id || pg.docId || ("PG_" + Date.now() + "_" + i),
+          id: pageIdStr,
           pageNum: `P${i + 1}`,
           space: spaceName,
           docType: rawDocType,
@@ -210,10 +220,10 @@ async function openLegacyImporter() {
           title: `${spaceName} · ${typeLabel}`,
           author: pg.author || target.lastModifiedBy || "",
           date: pg.date || target.date || "",
-          badgeCount: oldLines.length + oldPins.length,
           sitePhotoUrl: imgUrl,
           designPhotoUrl: "",
           lines: oldLines,
+          markers: oldMarkers,
           pins: oldPins,
           auditTickets: []
         });
@@ -225,7 +235,8 @@ async function openLegacyImporter() {
       const newProj = {
         id: newId,
         name: baseName + codeTag,
-        legacySourceId: target.docId,
+        legacySourceId: String(target.docId),
+        spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
         pages: convertedPages,
         updatedAt: Date.now()
       };
@@ -251,6 +262,14 @@ async function saveCurrentProject() {
   await setDoc(doc(db, COLLECTIONS.PROJECTS, currentProject.id), currentProject);
 }
 
+function getSpaceRank(sp) {
+  if (!sp || sp === "未標空間") return 999;
+  if (sp === "總圖") return 0;
+  const order = currentProject?.spaceOrder || [];
+  const idx = order.indexOf(sp);
+  return idx === -1 ? 500 : idx + 1;
+}
+
 function renderWorkspace() {
   if (activePageIdx >= 0 && currentProject.pages[activePageIdx]) {
     renderSinglePageEditor(currentProject.pages[activePageIdx]);
@@ -261,7 +280,7 @@ function renderWorkspace() {
 
 function renderOverview() {
   const pages = currentProject.pages || [];
-  const allSpaces = [...new Set(pages.map(p => p.space || "未分類空間"))];
+  const allSpaces = [...new Set(pages.map(p => p.space || "未標空間"))].sort((a, b) => getSpaceRank(a) - getSpaceRank(b));
 
   const typeCounts = { ALL: pages.length };
   pages.forEach(p => {
@@ -270,21 +289,28 @@ function renderOverview() {
   });
 
   const filteredPages = pages.filter(p => {
-    const spOk = filterSpace === "ALL" || (p.space || "未分類空間") === filterSpace;
+    const spOk = filterSpace === "ALL" || (p.space || "未標空間") === filterSpace;
     const lbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
     const tpOk = filterDocType === "ALL" || lbl === filterDocType;
     return spOk && tpOk;
   });
 
-  const groups = {};
+  const groupsMap = new Map();
   filteredPages.forEach(p => {
-    const sp = p.space || "未分類空間";
-    if (!groups[sp]) groups[sp] = [];
-    groups[sp].push(p);
+    const sp = p.space || "未標空間";
+    if (!groupsMap.has(sp)) groupsMap.set(sp, []);
+    groupsMap.get(sp).push(p);
   });
 
+  const sortedGroups = Array.from(groupsMap.entries())
+    .sort((a, b) => getSpaceRank(a[0]) - getSpaceRank(b[0]))
+    .map(([sp, items]) => [
+      sp,
+      [...items].sort((a, b) => (DOC_TYPE_RANK[a.docType] || 7) - (DOC_TYPE_RANK[b.docType] || 7))
+    ]);
+
   root.innerHTML = `
-    <!-- 頂部工具列 -->
+    <!-- 頂部導航列 -->
     <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
       <div style="display:flex; align-items:center; gap:8px;">
         <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
@@ -296,7 +322,7 @@ function renderOverview() {
       </div>
     </div>
 
-    <!-- 雙層篩選 + 檢視模式切換列 -->
+    <!-- 雙層篩選 + 圖集/展開模式切換列 -->
     <div class="card" style="padding:10px; margin-bottom:10px;">
       <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #E5E7EB;">
         <span style="font-size:12px; color:#6B7280; margin-right:2px;">${filteredPages.length}/${pages.length}頁</span>
@@ -336,7 +362,7 @@ function renderOverview() {
       </div>
     </div>
 
-    <!-- 主內容區：圖集資料夾模式 vs 展開全圖模式 -->
+    <!-- 主內容區：圖集資料夾網格 vs 展開空間分區網格 -->
     <div id="main-gallery-host"></div>
   `;
 
@@ -362,17 +388,17 @@ function renderOverview() {
 
   const galleryHost = document.getElementById("main-gallery-host");
   if (viewMode === "FOLDER" && filterSpace === "ALL") {
-    renderFolderGrid(galleryHost, groups, pages);
+    renderFolderGrid(galleryHost, sortedGroups, pages);
   } else {
-    renderExpandedSections(galleryHost, groups, pages);
+    renderExpandedSections(galleryHost, sortedGroups, pages);
   }
 }
 
-// 圖集模式：每個空間一張大資料夾卡片（標題+張數 / 主封面預覽 / 底部4張迷你縮圖 +N + 展開>）
-function renderFolderGrid(host, groups, allPages) {
+// 圖集資料夾卡片模式（完全還原截圖：空間名 + 張數 / 主封面預覽 / 底部4張迷你縮圖 + +N + 展開>）
+function renderFolderGrid(host, sortedGroups, allPages) {
   host.innerHTML = `
     <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px;">
-      ${Object.entries(groups).map(([spaceName, items]) => {
+      ${sortedGroups.map(([spaceName, items]) => {
         const activeSubIdx = Math.min(folderCoverIndex[spaceName] || 0, items.length - 1);
         const coverPage = items[activeSubIdx];
         const coverType = coverPage.docTypeLabel || DOC_TYPE_LABELS[coverPage.docType] || "拍攝";
@@ -380,20 +406,16 @@ function renderFolderGrid(host, groups, allPages) {
         const extraCount = items.length - 4;
 
         return `
-          <div class="space-folder-card" data-folder-space="${spaceName}"
-               style="background:#FFF; border:1px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
-            <!-- 卡片頂部：空間名 + 張數 -->
+          <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
             <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#F8FAFC; border-bottom:1px solid #E2E8F0;">
               <strong style="font-size:15px; color:#1E293B;">${spaceName}</strong>
               <span style="font-size:12px; color:#64748B;">${items.length}張</span>
             </div>
 
-            <!-- 當前預覽類型標記 -->
             <div style="padding:4px 12px 0 12px; font-size:12px; color:#64748B;">
               ${coverType}
             </div>
 
-            <!-- 中央主封面預覽圖（點擊直接進入該圖度尺） -->
             <div class="folder-main-preview" data-open-page="${allPages.indexOf(coverPage)}"
                  style="height:185px; margin:6px 12px; background:#F1F5F9; border-radius:4px; display:flex; align-items:center; justify-content:center; cursor:pointer; overflow:hidden;">
               ${coverPage.sitePhotoUrl
@@ -401,7 +423,6 @@ function renderFolderGrid(host, groups, allPages) {
                 : `<span style="color:#94A3B8; font-size:12px;">尚未上傳圖紙</span>`}
             </div>
 
-            <!-- 底部迷你縮圖條 +N + 展開 > -->
             <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; border-top:1px solid #F1F5F9; background:#FAFAFA;">
               <div style="display:flex; align-items:center; gap:4px;">
                 ${previewThumbs.map((tp, tIdx) => `
@@ -425,7 +446,6 @@ function renderFolderGrid(host, groups, allPages) {
     </div>
   `;
 
-  // 點擊迷你小縮圖切換主預覽
   host.querySelectorAll(".mini-thumb-btn").forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
@@ -434,7 +454,6 @@ function renderFolderGrid(host, groups, allPages) {
     };
   });
 
-  // 點擊「展開 ›」篩選並展開該空間所有圖紙
   host.querySelectorAll(".folder-expand-btn").forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
@@ -444,7 +463,6 @@ function renderFolderGrid(host, groups, allPages) {
     };
   });
 
-  // 點擊中央主封面圖直接進入該頁度尺/審圖
   host.querySelectorAll(".folder-main-preview").forEach(box => {
     box.onclick = () => {
       activePageIdx = Number(box.dataset.openPage);
@@ -453,11 +471,11 @@ function renderFolderGrid(host, groups, allPages) {
   });
 }
 
-// 展開模式：依空間分區框顯示所有單頁縮圖卡片
-function renderExpandedSections(host, groups, allPages) {
+// 展開模式：獨立空間分區框 + 三欄縮圖卡片
+function renderExpandedSections(host, sortedGroups, allPages) {
   host.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:14px;">
-      ${Object.entries(groups).map(([spaceName, items]) => `
+      ${sortedGroups.map(([spaceName, items]) => `
         <div style="background:#F8FAFC; border:1.5px solid #CBD5E1; border-radius:8px; padding:12px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
             <div style="font-weight:700; font-size:15px; color:#1E293B;">
@@ -473,7 +491,7 @@ function renderExpandedSections(host, groups, allPages) {
               const realIdx = allPages.indexOf(p);
               const pNum = p.pageNum || `P${realIdx + 1}`;
               const tLbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
-              const count = (p.lines || []).length + (p.pins || []).length;
+              const count = (p.lines || []).length + (p.markers || []).length;
               const shortDate = (p.date || "").slice(5);
               return `
                 <div class="page-grid-card" data-open-idx="${realIdx}"
@@ -560,6 +578,7 @@ function setupDictPicker() {
       sitePhotoUrl: "",
       designPhotoUrl: "",
       lines: [],
+      markers: [],
       pins: [],
       auditTickets: []
     });
