@@ -1,4 +1,4 @@
-import { collection, doc, getDocs, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { collection, doc, getDoc, getDocs, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { db, COLLECTIONS } from "./config/firebase-init.js";
 import { loadMasterDict } from "./config/master-dict.js";
 import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
@@ -15,6 +15,7 @@ let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
 let folderCoverIndex = {};
+const memoryPhotoCache = new Map(); // 記憶體快取，瞬間切換圖紙不卡頓
 
 const DOC_TYPE_LABELS = {
   plan: "平面圖",
@@ -90,26 +91,70 @@ async function renderProjectList() {
   };
 
   root.querySelectorAll("[data-id]").forEach(card => {
-    card.onclick = () => {
+    card.onclick = async () => {
       const found = projects.find(p => p.id === card.dataset.id);
-      if (found) openProject(found);
+      if (found) await openProjectWithHydration(found);
     };
   });
+}
+
+// 取得分頁圖片：優先從記憶體快取 / 舊系統切片 / 新系統獨立媒體庫載入
+async function hydrateProjectPhotos(proj) {
+  const pages = proj.pages || [];
+  await Promise.all(pages.map(async (p) => {
+    if (p.sitePhotoUrl && p.sitePhotoUrl.length > 50) {
+      memoryPhotoCache.set(p.id, p.sitePhotoUrl);
+      return;
+    }
+    if (memoryPhotoCache.has(p.id)) {
+      p.sitePhotoUrl = memoryPhotoCache.get(p.id);
+      return;
+    }
+    // 1. 嘗試從新系統獨立媒體表讀取
+    if (p.mediaRefId) {
+      try {
+        const mDoc = await getDoc(doc(db, COLLECTIONS.MEDIA, p.mediaRefId));
+        if (mDoc.exists() && mDoc.data().imageData) {
+          p.sitePhotoUrl = mDoc.data().imageData;
+          memoryPhotoCache.set(p.id, p.sitePhotoUrl);
+          return;
+        }
+      } catch (_) {}
+    }
+    // 2. 若有舊系統來源，直接即時還原切片（保證 100% 不受 1MB 限制）
+    if (proj.legacySourceId && p.legacyMediaId) {
+      const url = await resolveLegacyMediaPhoto(proj.legacySourceId, p.legacyMediaId, { chunked: true });
+      if (url) {
+        p.sitePhotoUrl = url;
+        memoryPhotoCache.set(p.id, url);
+      }
+    }
+  }));
+}
+
+async function openProjectWithHydration(proj) {
+  root.innerHTML = `<div class="card">正在載入空間圖集與高清底圖...</div>`;
+  await hydrateProjectPhotos(proj);
+  openProject(proj);
 }
 
 async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
   if (!mediaDocId) return "";
   if (mediaMeta && mediaMeta.photo) return mediaMeta.photo;
-  const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
-  const list = [];
-  chunksSnap.forEach(c => list.push(c.data()));
-  if (!list.length) return "";
-  list.sort((a, b) => (a.index || 0) - (b.index || 0));
-  let combined = list.map(c => c.data || "").join("");
-  if (combined && !combined.startsWith("data:image") && !combined.startsWith("http")) {
-    combined = "data:image/jpeg;base64," + combined;
+  try {
+    const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
+    const list = [];
+    chunksSnap.forEach(c => list.push(c.data()));
+    if (!list.length) return "";
+    list.sort((a, b) => (a.index || 0) - (b.index || 0));
+    let combined = list.map(c => c.data || "").join("");
+    if (combined && !combined.startsWith("data:image") && !combined.startsWith("http")) {
+      combined = "data:image/jpeg;base64," + combined;
+    }
+    return combined;
+  } catch (_) {
+    return "";
   }
-  return combined;
 }
 
 async function openLegacyImporter() {
@@ -151,7 +196,7 @@ async function openLegacyImporter() {
       btn.onclick = async () => {
         const target = legacyItems[Number(btn.dataset.idx)];
         btn.disabled = true;
-        btn.textContent = "讀取子集合中...";
+        btn.textContent = "讀取分頁與圖庫中...";
         statusEl.textContent = "";
 
         try {
@@ -159,13 +204,6 @@ async function openLegacyImporter() {
             getDocs(collection(db, "site_projects", String(target.docId), "pages")),
             getDocs(collection(db, "site_projects", String(target.docId), "media"))
           ]);
-
-          if (pagesSnap.empty && mediaSnap.empty) {
-            statusEl.textContent = `⚠️ 讀取到 pages=0, media=0！`;
-            btn.disabled = false;
-            btn.textContent = "重試匯入";
-            return;
-          }
 
           const rawPagesMap = {};
           pagesSnap.forEach(d => {
@@ -189,16 +227,10 @@ async function openLegacyImporter() {
             if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
           });
 
-          const photoCache = new Map();
-          const getCachedPhoto = async (mId) => {
-            if (!mId) return "";
-            if (photoCache.has(mId)) return photoCache.get(mId);
-            const url = await resolveLegacyMediaPhoto(target.docId, mId, mediaMetaMap.get(mId));
-            photoCache.set(mId, url);
-            return url;
-          };
+          const newId = "P_" + Date.now();
+          const convertedPagesForDb = [];
+          const convertedPagesForMemory = [];
 
-          const convertedPages = [];
           for (let i = 0; i < orderedIds.length; i++) {
             btn.textContent = `還原圖紙 (${i + 1}/${orderedIds.length})...`;
             const pg = rawPagesMap[orderedIds[i]];
@@ -210,21 +242,32 @@ async function openLegacyImporter() {
             const rawDocType = pg.docType || "photo";
             const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
 
+            let matchedMediaId = "";
+            if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) matchedMediaId = String(pg.photoId);
+            else if (mediaMetaMap.has("page_" + pageIdStr)) matchedMediaId = "page_" + pageIdStr;
+            else if (mediaIdsList[i]) matchedMediaId = mediaIdsList[i];
+
             let imgUrl = "";
-            if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) {
-              imgUrl = await getCachedPhoto(String(pg.photoId));
+            if (matchedMediaId) {
+              imgUrl = await resolveLegacyMediaPhoto(target.docId, matchedMediaId, mediaMetaMap.get(matchedMediaId));
             }
-            if (!imgUrl && mediaMetaMap.has("page_" + pageIdStr)) {
-              imgUrl = await getCachedPhoto("page_" + pageIdStr);
-            }
-            if (!imgUrl && pg.photo) {
-              imgUrl = pg.photo;
-            }
-            if (!imgUrl && mediaIdsList[i]) {
-              imgUrl = await getCachedPhoto(mediaIdsList[i]);
+            if (!imgUrl && pg.photo) imgUrl = pg.photo;
+
+            // 分拆存入 measuring_media（單張獨立存放，避開 Firestore 1MB 文件上限）
+            let mediaRefId = "";
+            if (imgUrl && imgUrl.length < 900000) {
+              mediaRefId = `${newId}_${pageIdStr}`;
+              await setDoc(doc(db, COLLECTIONS.MEDIA, mediaRefId), {
+                projectId: newId,
+                pageId: pageIdStr,
+                imageData: imgUrl,
+                updatedAt: Date.now()
+              }).catch(() => { mediaRefId = ""; });
             }
 
-            convertedPages.push({
+            memoryPhotoCache.set(pageIdStr, imgUrl);
+
+            const basePageMeta = {
               id: pageIdStr,
               pageNum: `P${i + 1}`,
               space: spaceName,
@@ -233,29 +276,41 @@ async function openLegacyImporter() {
               title: `${spaceName} · ${typeLabel}`,
               author: pg.author || target.lastModifiedBy || "",
               date: pg.date || target.date || "",
-              sitePhotoUrl: imgUrl,
+              mediaRefId,
+              legacyMediaId: matchedMediaId,
               designPhotoUrl: "",
               lines: Array.isArray(pg.lines) ? pg.lines : [],
               markers: Array.isArray(pg.markers) ? pg.markers : [],
               pins: Array.isArray(pg.pins) ? pg.pins : [],
               auditTickets: []
-            });
+            };
+
+            // 寫入 Firestore 總表時不塞入巨大 base64，確保瞬間寫入成功！
+            convertedPagesForDb.push({ ...basePageMeta, sitePhotoUrl: "" });
+            // 記憶體內保留完整圖片，立刻秒開圖集！
+            convertedPagesForMemory.push({ ...basePageMeta, sitePhotoUrl: imgUrl });
           }
 
-          const newId = "P_" + Date.now();
           const baseName = (target.name || target.title || "未命名工程").trim();
           const codeTag = target.code ? ` (${target.code})` : "";
-          const newProj = {
+
+          await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), {
             id: newId,
             name: baseName + codeTag,
             legacySourceId: String(target.docId),
             spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
-            pages: convertedPages,
+            pages: convertedPagesForDb,
             updatedAt: Date.now()
-          };
+          });
 
-          await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), newProj);
-          openProject(newProj);
+          openProject({
+            id: newId,
+            name: baseName + codeTag,
+            legacySourceId: String(target.docId),
+            spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
+            pages: convertedPagesForMemory,
+            updatedAt: Date.now()
+          });
         } catch (err) {
           statusEl.textContent = `❌ 匯入失敗：${err.message || err}`;
           btn.disabled = false;
@@ -280,7 +335,15 @@ function openProject(proj) {
 
 async function saveCurrentProject() {
   currentProject.updatedAt = Date.now();
-  await setDoc(doc(db, COLLECTIONS.PROJECTS, currentProject.id), currentProject);
+  // 儲存總表時把 base64 剝離（避免超過 1MB），圖片全存在記憶體與獨立媒體庫
+  const slimPages = (currentProject.pages || []).map(p => {
+    if (p.sitePhotoUrl) memoryPhotoCache.set(p.id, p.sitePhotoUrl);
+    return { ...p, sitePhotoUrl: "" };
+  });
+  await setDoc(doc(db, COLLECTIONS.PROJECTS, currentProject.id), {
+    ...currentProject,
+    pages: slimPages
+  });
 }
 
 function getSpaceRank(sp) {
@@ -668,6 +731,7 @@ function renderSinglePageEditor(page) {
     host.innerHTML = `<div class="card">正在壓縮並同步現場圖至雲端...</div>`;
     const res = await uploadMediaToCloud(currentProject.id, page.id, file);
     page.sitePhotoUrl = res.imageData;
+    memoryPhotoCache.set(page.id, res.imageData);
     await saveCurrentProject();
     showMeasure();
   };
