@@ -1,0 +1,94 @@
+:root {
+  --bg-page: #F5F5F7;
+  --bg-card: #FFFFFF;
+  --text-main: #111827;
+  --text-sub: #4B5563;
+  --border-line: #D1D5DB;
+  --border-dark: #111827;
+
+  --color-alert: #DC2626;
+  --color-warn: #D97706;
+  --color-pass: #16A34A;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang HK", sans-serif;
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.hidden { display: none !important; }
+
+.banner-warning {
+  background: #FEF3C7;
+  color: #92400E;
+  border-bottom: 1px solid #F59E0B;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.app-header {
+  position: sticky; top: 0; z-index: 50;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-dark);
+  padding: 10px 14px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.brand-title { font-weight: 800; letter-spacing: 1px; font-size: 16px; }
+.header-left, .header-right { display: flex; align-items: center; gap: 8px; }
+
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot-green { background: var(--color-pass); }
+.dot-amber { background: var(--color-warn); }
+.dot-red { background: var(--color-alert); }
+
+.btn-solid, .btn-outline {
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 8px 14px;
+  font-size: 14px;
+  border: 1px solid var(--border-dark);
+}
+.btn-solid { background: var(--border-dark); color: #FFFFFF; }
+.btn-outline { background: #FFFFFF; color: var(--text-main); }
+.btn-sm { padding: 5px 10px; font-size: 13px; }
+
+.app-container { max-width: 960px; margin: 0 auto; padding: 12px; }
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-line);
+  border-radius: 6px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.section-title {
+  font-size: 13px; font-weight: 700; color: var(--text-sub);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin: 0 0 8px 0;
+}
+
+.chip-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  background: #FFFFFF;
+  border: 1px solid var(--border-line);
+  color: var(--text-main);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip.active {
+  background: var(--border-dark);
+  border-color: var(--border-dark);
+  color: #FFFFFF;
+}
+.chip-pinned::before { content: "★ "; font-size: 11px; }
