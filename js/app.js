@@ -8,6 +8,7 @@ import { renderReportBuilder } from "./modules/report-builder.js";
 
 const PROJ_COL = (COLLECTIONS && COLLECTIONS.PROJECTS) || "measuring_projects";
 const MEDIA_COL = (COLLECTIONS && COLLECTIONS.MEDIA) || "measuring_media";
+const HIDDEN_STORAGE_KEY = "measuring_hidden_proj_ids";
 
 const root = document.getElementById("app-root");
 let masterDict = null;
@@ -16,6 +17,8 @@ let activePageIdx = -1;
 let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
+let filterReviewOnly = false;
+let showHiddenProjects = false;
 let folderCoverIndex = {};
 let activeCanvasInstance = null;
 const memoryPhotoCache = new Map();
@@ -26,10 +29,11 @@ const DOC_TYPE_LABELS = {
   "3d": "立體圖",
   detail: "詳圖",
   render: "效果圖",
-  dim: "尺吋圖"
+  dim: "尺吋圖",
+  sketch: "白底草圖"
 };
 
-const DOC_TYPE_RANK = { plan: 1, photo: 2, "3d": 3, dim: 4, detail: 5, render: 6 };
+const DOC_TYPE_RANK = { plan: 1, photo: 2, "3d": 3, dim: 4, detail: 5, render: 6, sketch: 7 };
 
 const ZONE_THEMES = [
   { bg: "#FFFBEB", border: "#F59E0B", headerBg: "#FEF3C7", text: "#78350F", badgeBg: "#FDE68A" },
@@ -40,6 +44,26 @@ const ZONE_THEMES = [
 ];
 const MASTER_ZONE_THEME = { bg: "#FAF5FF", border: "#9333EA", headerBg: "#F3E8FF", text: "#581C87", badgeBg: "#E9D5FF" };
 const UNASSIGNED_ZONE_THEME = { bg: "#F8FAFC", border: "#64748B", headerBg: "#E2E8F0", text: "#1E293B", badgeBg: "#CBD5E1" };
+
+function getHiddenIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(HIDDEN_STORAGE_KEY) || "[]"));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function saveHiddenIds(setObj) {
+  localStorage.setItem(HIDDEN_STORAGE_KEY, JSON.stringify(Array.from(setObj)));
+}
+
+function countProjectAnnotations(proj) {
+  let total = 0;
+  (proj.pages || []).forEach(p => {
+    total += (p.lines || []).length + (p.markers || []).length + (p.paths || []).length + (p.stickers || []).length;
+  });
+  return total;
+}
 
 // 防止瀏覽器「上一頁」返回手勢意外跳離網站
 window.history.pushState({ measuringGuard: true }, "");
@@ -59,7 +83,6 @@ window.addEventListener("popstate", () => {
   }
 });
 
-// 關閉或重新整理視窗前提醒儲存
 window.addEventListener("beforeunload", (e) => {
   if (currentProject && activePageIdx >= 0) {
     e.preventDefault();
@@ -79,42 +102,77 @@ watchAuth(async () => {
 async function renderProjectList() {
   root.innerHTML = `<div class="card">載入工程清單中...</div>`;
   const snap = await getDocs(collection(db, PROJ_COL));
-  const projects = [];
-  snap.forEach(d => projects.push({ id: d.id, ...d.data() }));
-  projects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const rawProjects = [];
+  snap.forEach(d => rawProjects.push({ id: d.id, ...d.data() }));
+
+  // 自動去重：同 legacySourceId 或同名稱的重複副本，只保留標註最多／最新修改的一份
+  const dedupMap = new Map();
+  rawProjects.forEach(p => {
+    const key = p.legacySourceId ? `SRC_${p.legacySourceId}` : `NAME_${(p.name || "").trim()}`;
+    const existing = dedupMap.get(key);
+    if (!existing) {
+      dedupMap.set(key, p);
+    } else {
+      const scoreNew = countProjectAnnotations(p) * 1000000 + (p.updatedAt || 0);
+      const scoreOld = countProjectAnnotations(existing) * 1000000 + (existing.updatedAt || 0);
+      if (scoreNew > scoreOld) dedupMap.set(key, p);
+    }
+  });
+
+  const allUniqueProjects = Array.from(dedupMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const hiddenSet = getHiddenIds();
+  const visibleProjects = showHiddenProjects
+    ? allUniqueProjects
+    : allUniqueProjects.filter(p => !hiddenSet.has(p.id));
+  const hiddenCount = allUniqueProjects.filter(p => hiddenSet.has(p.id)).length;
 
   root.innerHTML = `
-    <div class="card" style="display:flex; flex-wrap:wrap; gap:6px;">
+    <div class="card" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
       <input type="text" id="new-proj-name" placeholder="輸入新工程名稱"
              style="flex:1; min-width:180px; padding:6px 8px; border:1px solid #111827; border-radius:4px; font-size:14px;" />
       <button id="btn-create-proj" class="btn-solid">+ 建立工程</button>
-      <button id="btn-import-legacy" class="btn-outline">📂 匯入舊系統工程</button>
+      <button id="btn-db-cleaner" class="btn-outline" style="color:#475569;">🧹 資料庫清理</button>
+      ${hiddenCount > 0 ? `
+        <button id="btn-toggle-hidden" class="btn-outline btn-sm" style="color:#6B7280;">
+          ${showHiddenProjects ? "隱藏已移除項目" : `顯示已移除 (${hiddenCount})`}
+        </button>
+      ` : ""}
     </div>
 
-    <div id="legacy-import-box" class="card hidden" style="background:#F9FAFB; border:1px solid #111827;">
+    <div id="db-cleaner-box" class="card hidden" style="background:#F8FAFC; border:1.5px solid #475569;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <strong style="font-size:13px;">從舊系統（site_projects）唯讀匯入工程</strong>
-        <button id="btn-close-legacy" class="btn-outline btn-sm">關閉</button>
+        <strong style="font-size:13px; color:#0F172A;">🧹 後台資料庫清潔（重複副本 / 零碎空工程 / 孤兒底圖）</strong>
+        <button id="btn-close-cleaner" class="btn-outline btn-sm">關閉</button>
       </div>
-      <div id="legacy-status-msg" style="font-size:12px; color:#DC2626; margin-bottom:4px;"></div>
-      <div id="legacy-list" style="display:flex; flex-direction:column; gap:5px; font-size:13px; color:#4B5563;">
-        載入中...
-      </div>
+      <div id="cleaner-body" style="font-size:12px; color:#334155;">正在掃描雲端資料庫...</div>
     </div>
 
     <div id="proj-cards">
-      ${projects.map(p => `
-        <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-          <div style="flex:1; cursor:pointer;" data-id="${p.id}">
-            <div style="font-weight:700; font-size:15px;">${p.name}</div>
-            <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
+      ${visibleProjects.map(p => {
+        const isHidden = hiddenSet.has(p.id);
+        const pendingReviews = (p.pages || []).reduce((acc, pg) => {
+          const list = Array.isArray(pg.reviewLogs) ? pg.reviewLogs : [];
+          return acc + list.filter(r => r.status === "PENDING").length;
+        }, 0);
+        return `
+          <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px; ${isHidden ? "opacity:0.6; background:#F8FAFC;" : ""}">
+            <div style="flex:1; cursor:pointer;" data-id="${p.id}">
+              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <strong style="font-size:15px;">${p.name}</strong>
+                ${isHidden ? `<span style="font-size:11px; background:#E2E8F0; color:#475569; padding:1px 6px; border-radius:4px;">已從本機移除</span>` : ""}
+                ${pendingReviews > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#DC2626; font-weight:700; padding:1px 6px; border-radius:4px;">🔴 ${pendingReviews}項待改</span>` : ""}
+              </div>
+              <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              ${isHidden
+                ? `<button class="btn-outline btn-sm" style="color:#059669; border-color:#6EE7B7;" data-restore-id="${p.id}">↩ 恢復顯示</button>`
+                : `<button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;" data-hide-id="${p.id}">📦 從本機清單移除</button>`}
+              <button class="btn-outline btn-sm" data-id="${p.id}">進入空間圖集 →</button>
+            </div>
           </div>
-          <div style="display:flex; gap:6px; align-items:center;">
-            <button class="btn-outline btn-sm" style="color:#DC2626; border-color:#FCA5A5;" data-del-id="${p.id}">🗑️ 刪除</button>
-            <button class="btn-outline btn-sm" data-id="${p.id}">進入空間圖集 →</button>
-          </div>
-        </div>
-      `).join("") || `<div class="card" style="color:#6B7280;">尚未建立工程，請在上方輸入名稱建立，或點擊「📂 匯入舊系統工程」。</div>`}
+        `;
+      }).join("") || `<div class="card" style="color:#6B7280;">目前清單沒有顯示中的工程，請在上方輸入名稱建立。</div>`}
     </div>
   `;
 
@@ -127,29 +185,129 @@ async function renderProjectList() {
     openProject(newProj);
   };
 
-  document.getElementById("btn-import-legacy").onclick = openLegacyImporter;
-  document.getElementById("btn-close-legacy").onclick = () => {
-    document.getElementById("legacy-import-box").classList.add("hidden");
+  const toggleHiddenBtn = document.getElementById("btn-toggle-hidden");
+  if (toggleHiddenBtn) {
+    toggleHiddenBtn.onclick = () => {
+      showHiddenProjects = !showHiddenProjects;
+      renderProjectList();
+    };
+  }
+
+  document.getElementById("btn-db-cleaner").onclick = () => openDatabaseCleaner(rawProjects);
+  document.getElementById("btn-close-cleaner").onclick = () => {
+    document.getElementById("db-cleaner-box").classList.add("hidden");
   };
 
-  root.querySelectorAll("[data-del-id]").forEach(btn => {
-    btn.onclick = async (e) => {
+  root.querySelectorAll("[data-hide-id]").forEach(btn => {
+    btn.onclick = (e) => {
       e.stopPropagation();
-      const delId = btn.dataset.delId;
-      if (!confirm("確定要刪除此工程紀錄嗎？（不會影響舊系統原始資料）")) return;
-      btn.disabled = true;
-      btn.textContent = "刪除中...";
-      await deleteDoc(doc(db, PROJ_COL, delId));
+      const s = getHiddenIds();
+      s.add(btn.dataset.hideId);
+      saveHiddenIds(s);
+      renderProjectList();
+    };
+  });
+
+  root.querySelectorAll("[data-restore-id]").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const s = getHiddenIds();
+      s.delete(btn.dataset.restoreId);
+      saveHiddenIds(s);
       renderProjectList();
     };
   });
 
   root.querySelectorAll("[data-id]").forEach(el => {
     el.onclick = async () => {
-      const found = projects.find(p => p.id === el.dataset.id);
+      const found = allUniqueProjects.find(p => p.id === el.dataset.id);
       if (found) await openProjectWithHydration(found);
     };
   });
+}
+
+async function openDatabaseCleaner(rawProjects) {
+  const box = document.getElementById("db-cleaner-box");
+  const body = document.getElementById("cleaner-body");
+  box.classList.remove("hidden");
+  body.innerHTML = `正在掃描重複工程、零碎空檔與孤兒圖片...`;
+
+  try {
+    const mediaSnap = await getDocs(collection(db, MEDIA_COL));
+    const allMediaIds = [];
+    mediaSnap.forEach(d => allMediaIds.push(d.id));
+
+    // 1. 找出重複工程副本
+    const groups = new Map();
+    rawProjects.forEach(p => {
+      const key = p.legacySourceId ? `SRC_${p.legacySourceId}` : `NAME_${(p.name || "").trim()}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    });
+
+    const duplicateProjs = [];
+    const keptProjs = [];
+    groups.forEach(list => {
+      list.sort((a, b) => (countProjectAnnotations(b) * 1000000 + (b.updatedAt || 0)) - (countProjectAnnotations(a) * 1000000 + (a.updatedAt || 0)));
+      keptProjs.push(list[0]);
+      for (let i = 1; i < list.length; i++) duplicateProjs.push(list[i]);
+    });
+
+    // 2. 找出零碎空工程（0頁或完全無底圖無標註）
+    const emptyProjs = keptProjs.filter(p => {
+      const pages = p.pages || [];
+      if (pages.length === 0) return true;
+      const hasAnyContent = pages.some(pg => pg.mediaRefId || pg.legacyMediaId || (pg.sitePhotoUrl && pg.sitePhotoUrl.length > 20) || (pg.lines || []).length > 0);
+      return !hasAnyContent;
+    });
+
+    // 3. 找出孤兒底圖（沒有任何保留工程引用的 mediaRefId）
+    const validMediaSet = new Set();
+    keptProjs.forEach(p => {
+      (p.pages || []).forEach(pg => {
+        if (pg.mediaRefId) validMediaSet.add(String(pg.mediaRefId));
+      });
+    });
+    const orphanMediaIds = allMediaIds.filter(id => !validMediaSet.has(String(id)));
+
+    if (!duplicateProjs.length && !emptyProjs.length && !orphanMediaIds.length) {
+      body.innerHTML = `<div style="color:#059669; font-weight:700; padding:6px 0;">✅ 資料庫非常乾淨，沒有重複工程、零碎空檔或孤兒圖片！</div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+        <div>• 重複多餘工程副本：<strong>${duplicateProjs.length}</strong> 筆（將保留標註最多的一份）</div>
+        <div>• 零碎無內容空工程：<strong>${emptyProjs.length}</strong> 筆</div>
+        <div>• 無人引用的孤兒圖片：<strong>${orphanMediaIds.length}</strong> 張</div>
+      </div>
+      <button id="btn-exec-clean" class="btn-solid btn-sm" style="background:#DC2626; border-color:#DC2626;">
+        🧹 一鍵徹底清理以上零碎與重複資料
+      </button>
+    `;
+
+    document.getElementById("btn-exec-clean").onclick = async () => {
+      if (!confirm(`確定要永久清理這 ${duplicateProjs.length + emptyProjs.length} 筆零碎工程與 ${orphanMediaIds.length} 張孤兒圖片嗎？`)) return;
+      const execBtn = document.getElementById("btn-exec-clean");
+      execBtn.disabled = true;
+      execBtn.textContent = "清理中，請稍候...";
+
+      for (const dp of duplicateProjs) {
+        await deleteDoc(doc(db, PROJ_COL, dp.id)).catch(() => {});
+      }
+      for (const ep of emptyProjs) {
+        await deleteDoc(doc(db, PROJ_COL, ep.id)).catch(() => {});
+      }
+      for (const mid of orphanMediaIds) {
+        await deleteDoc(doc(db, MEDIA_COL, mid)).catch(() => {});
+      }
+
+      alert("✅ 資料庫清理完成！");
+      renderProjectList();
+    };
+  } catch (err) {
+    body.innerHTML = `<span style="color:#DC2626;">掃描失敗：${err.message || err}</span>`;
+  }
 }
 
 async function hydrateProjectPhotos(proj) {
@@ -174,7 +332,7 @@ async function hydrateProjectPhotos(proj) {
       } catch (_) {}
     }
     if (proj.legacySourceId && p.legacyMediaId) {
-      const url = await resolveLegacyMediaPhoto(proj.legacySourceId, p.legacyMediaId, { chunked: true });
+      const url = await resolveLegacyMediaPhoto(proj.legacySourceId, p.legacyMediaId);
       if (url) {
         p.sitePhotoUrl = url;
         memoryPhotoCache.set(p.id, url);
@@ -189,9 +347,8 @@ async function openProjectWithHydration(proj) {
   openProject(proj);
 }
 
-async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
+async function resolveLegacyMediaPhoto(projectDocId, mediaDocId) {
   if (!mediaDocId) return "";
-  if (mediaMeta && mediaMeta.photo) return mediaMeta.photo;
   try {
     const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
     const list = [];
@@ -208,177 +365,13 @@ async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
   }
 }
 
-async function openLegacyImporter() {
-  const box = document.getElementById("legacy-import-box");
-  const listEl = document.getElementById("legacy-list");
-  const statusEl = document.getElementById("legacy-status-msg");
-  box.classList.remove("hidden");
-  statusEl.textContent = "";
-  listEl.innerHTML = `正在讀取舊系統工程清單...`;
-
-  try {
-    const snap = await getDocs(collection(db, "site_projects"));
-    const legacyItems = [];
-    snap.forEach(d => legacyItems.push({ docId: d.id, ...d.data() }));
-    legacyItems.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-
-    if (!legacyItems.length) {
-      listEl.innerHTML = `舊系統目前沒有工程資料。`;
-      return;
-    }
-
-    listEl.innerHTML = legacyItems.map((item, idx) => {
-      const title = (item.name || item.title || "未命名工程").trim();
-      const code = item.code || item.docId;
-      const dateStr = item.date ? ` · ${item.date}` : "";
-      const pgCount = Array.isArray(item.pageIds) ? item.pageIds.length : 0;
-      return `
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:#FFF; border:1px solid #D1D5DB; border-radius:4px;">
-          <div>
-            <div style="font-weight:700; color:#111827;">${title}</div>
-            <div style="font-size:12px; color:#6B7280;">編號：${code}${dateStr} · 記錄 ${pgCount} 頁</div>
-          </div>
-          <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入並還原圖集</button>
-        </div>
-      `;
-    }).join("");
-
-    listEl.querySelectorAll(".legacy-do-import").forEach(btn => {
-      btn.onclick = async () => {
-        const target = legacyItems[Number(btn.dataset.idx)];
-        btn.disabled = true;
-        btn.textContent = "讀取分頁與圖庫中...";
-        statusEl.textContent = "";
-
-        try {
-          const [pagesSnap, mediaSnap] = await Promise.all([
-            getDocs(collection(db, "site_projects", String(target.docId), "pages")),
-            getDocs(collection(db, "site_projects", String(target.docId), "media"))
-          ]);
-
-          const rawPagesMap = {};
-          pagesSnap.forEach(d => {
-            rawPagesMap[String(d.id)] = { docId: String(d.id), ...d.data() };
-          });
-
-          const mediaMetaMap = new Map();
-          const mediaIdsList = [];
-          mediaSnap.forEach(m => {
-            const idStr = String(m.id);
-            mediaMetaMap.set(idStr, m.data() || {});
-            mediaIdsList.push(idStr);
-          });
-
-          const deletedSet = new Set((target.deletedPageIds || []).map(String));
-          const orderedIds = Array.isArray(target.pageIds) && target.pageIds.length > 0
-            ? target.pageIds.map(String).filter(id => rawPagesMap[id] && !deletedSet.has(id))
-            : Object.keys(rawPagesMap).filter(id => !deletedSet.has(id));
-
-          Object.keys(rawPagesMap).forEach(id => {
-            if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
-          });
-
-          const newId = "P_" + Date.now();
-          const convertedPagesForDb = [];
-          const convertedPagesForMemory = [];
-
-          for (let i = 0; i < orderedIds.length; i++) {
-            btn.textContent = `還原圖紙 (${i + 1}/${orderedIds.length})...`;
-            const pg = rawPagesMap[orderedIds[i]];
-            const pageIdStr = String(pg.id || pg.docId);
-
-            const rawSpace = (Array.isArray(pg.spaces) && pg.spaces[0]) ? pg.spaces[0] : (pg.space || "");
-            const spaceName = String(rawSpace).trim() || "未標空間";
-
-            const rawDocType = pg.docType || "photo";
-            const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
-
-            let matchedMediaId = "";
-            if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) matchedMediaId = String(pg.photoId);
-            else if (mediaMetaMap.has("page_" + pageIdStr)) matchedMediaId = "page_" + pageIdStr;
-            else if (mediaIdsList[i]) matchedMediaId = mediaIdsList[i];
-
-            let imgUrl = "";
-            if (matchedMediaId) {
-              imgUrl = await resolveLegacyMediaPhoto(target.docId, matchedMediaId, mediaMetaMap.get(matchedMediaId));
-            }
-            if (!imgUrl && pg.photo) imgUrl = pg.photo;
-
-            let mediaRefId = "";
-            if (imgUrl && imgUrl.length < 900000) {
-              mediaRefId = `${newId}_${pageIdStr}`;
-              await setDoc(doc(db, MEDIA_COL, mediaRefId), {
-                projectId: newId,
-                pageId: pageIdStr,
-                imageData: imgUrl,
-                updatedAt: Date.now()
-              }).catch(() => { mediaRefId = ""; });
-            }
-
-            memoryPhotoCache.set(pageIdStr, imgUrl);
-
-            const basePageMeta = {
-              id: pageIdStr,
-              pageNum: `P${i + 1}`,
-              space: spaceName,
-              docType: rawDocType,
-              docTypeLabel: typeLabel,
-              title: `${spaceName} · ${typeLabel}`,
-              author: pg.author || target.lastModifiedBy || "",
-              date: pg.date || target.date || "",
-              mediaRefId,
-              legacyMediaId: matchedMediaId,
-              designPhotoUrl: "",
-              lines: Array.isArray(pg.lines) ? pg.lines : [],
-              markers: Array.isArray(pg.markers) ? pg.markers : [],
-              paths: Array.isArray(pg.paths) ? pg.paths : (Array.isArray(pg.strokes) ? pg.strokes : []),
-              walls: Array.isArray(pg.walls) ? pg.walls : [],
-              pins: Array.isArray(pg.pins) ? pg.pins : [],
-              stickers: Array.isArray(pg.stickers) ? pg.stickers : []
-            };
-
-            convertedPagesForDb.push({ ...basePageMeta, sitePhotoUrl: "" });
-            convertedPagesForMemory.push({ ...basePageMeta, sitePhotoUrl: imgUrl });
-          }
-
-          const baseName = (target.name || target.title || "未命名工程").trim();
-          const codeTag = target.code ? ` (${target.code})` : "";
-
-          await setDoc(doc(db, PROJ_COL, newId), {
-            id: newId,
-            name: baseName + codeTag,
-            legacySourceId: String(target.docId),
-            spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
-            pages: convertedPagesForDb,
-            updatedAt: Date.now()
-          });
-
-          openProject({
-            id: newId,
-            name: baseName + codeTag,
-            legacySourceId: String(target.docId),
-            spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
-            pages: convertedPagesForMemory,
-            updatedAt: Date.now()
-          });
-        } catch (err) {
-          statusEl.textContent = `❌ 匯入失敗：${err.message || err}`;
-          btn.disabled = false;
-          btn.textContent = "重試匯入";
-        }
-      };
-    });
-  } catch (e) {
-    statusEl.textContent = `❌ 讀取舊清單失敗：${e.message || e}`;
-  }
-}
-
 function openProject(proj) {
   currentProject = proj;
   activePageIdx = -1;
   viewMode = "FOLDER";
   filterSpace = "ALL";
   filterDocType = "ALL";
+  filterReviewOnly = false;
   folderCoverIndex = {};
   renderWorkspace();
 }
@@ -418,16 +411,20 @@ function renderOverview() {
   const allSpaces = [...new Set(pages.map(p => p.space || "未標空間"))].sort((a, b) => getSpaceRank(a) - getSpaceRank(b));
 
   const typeCounts = { ALL: pages.length };
+  let totalPendingReviews = 0;
   pages.forEach(p => {
     const lbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
     typeCounts[lbl] = (typeCounts[lbl] || 0) + 1;
+    const pLogs = Array.isArray(p.reviewLogs) ? p.reviewLogs : [];
+    totalPendingReviews += pLogs.filter(r => r.status === "PENDING").length;
   });
 
   const filteredPages = pages.filter(p => {
     const spOk = filterSpace === "ALL" || (p.space || "未標空間") === filterSpace;
     const lbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
     const tpOk = filterDocType === "ALL" || lbl === filterDocType;
-    return spOk && tpOk;
+    const revOk = !filterReviewOnly || (Array.isArray(p.reviewLogs) && p.reviewLogs.some(r => r.status === "PENDING"));
+    return spOk && tpOk && revOk;
   });
 
   const groupsMap = new Map();
@@ -450,10 +447,21 @@ function renderOverview() {
         <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
         <strong style="font-size:15px;">${currentProject.name}</strong>
       </div>
-      <div style="display:flex; gap:5px; align-items:center;">
+      <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#EF4444; color:#DC2626; font-weight:700;">
+          📋 批改總表 (${totalPendingReviews})
+        </button>
         <button id="btn-add-space" class="btn-outline btn-sm">+ 空間</button>
         <button id="btn-open-report" class="btn-solid btn-sm">報告與客戶預覽</button>
       </div>
+    </div>
+
+    <div id="project-review-board" class="card hidden" style="background:#FFFBFB; border:1.5px solid #FCA5A5; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <strong style="font-size:13px; color:#991B1B;">📋 本工程審圖批改與跟進總表</strong>
+        <button id="btn-close-review-board" class="btn-outline btn-sm">關閉</button>
+      </div>
+      <div id="project-review-list" style="display:flex; flex-direction:column; gap:5px; font-size:12px;"></div>
     </div>
 
     <div class="card" style="padding:7px 9px; margin-bottom:8px;">
@@ -461,6 +469,7 @@ function renderOverview() {
         <span style="font-size:11px; color:#6B7280; margin-right:2px;">${filteredPages.length}/${pages.length}頁</span>
         <button id="btn-mode-folder" class="chip ${viewMode === "FOLDER" ? "active" : ""}">🗂️ 圖集</button>
         <button id="btn-mode-expanded" class="chip ${viewMode === "EXPANDED" ? "active" : ""}">⊞ 展開</button>
+        <button id="btn-filter-review" class="chip ${filterReviewOnly ? "active" : ""}" style="${filterReviewOnly ? "background:#DC2626; border-color:#DC2626; color:#FFF;" : "color:#DC2626;"}">🔴 待改(${totalPendingReviews})</button>
         <span style="color:#D1D5DB;">|</span>
         <button class="chip ${filterSpace === "ALL" ? "active" : ""}" data-fsp="ALL">全部空間</button>
         ${allSpaces.map(sp => {
@@ -494,6 +503,7 @@ function renderOverview() {
           <option value="詳圖">詳圖</option>
           <option value="效果圖">效果圖</option>
           <option value="尺吋圖">尺吋圖</option>
+          <option value="白底草圖">白底草圖</option>
         </select>
         <button id="btn-confirm-page" class="btn-solid btn-sm">建立</button>
       </div>
@@ -508,6 +518,20 @@ function renderOverview() {
 
   document.getElementById("btn-mode-folder").onclick = () => { viewMode = "FOLDER"; renderOverview(); };
   document.getElementById("btn-mode-expanded").onclick = () => { viewMode = "EXPANDED"; renderOverview(); };
+  document.getElementById("btn-filter-review").onclick = () => {
+    filterReviewOnly = !filterReviewOnly;
+    if (filterReviewOnly) viewMode = "EXPANDED";
+    renderOverview();
+  };
+
+  document.getElementById("btn-review-board").onclick = () => {
+    const board = document.getElementById("project-review-board");
+    board.classList.toggle("hidden");
+    if (!board.classList.contains("hidden")) renderProjectReviewList();
+  };
+  document.getElementById("btn-close-review-board").onclick = () => {
+    document.getElementById("project-review-board").classList.add("hidden");
+  };
 
   let draggedSpaceName = null;
   const sortableSpaces = allSpaces.filter(s => s !== "總圖" && s !== "未標空間");
@@ -521,29 +545,17 @@ function renderOverview() {
     };
 
     if (btn.getAttribute("draggable") === "true") {
-      btn.ondragstart = (e) => {
-        draggedSpaceName = sp;
-        e.dataTransfer.effectAllowed = "move";
-      };
-      btn.ondragover = (e) => {
-        e.preventDefault();
-        if (draggedSpaceName && draggedSpaceName !== sp) {
-          btn.classList.add("chip-drag-over");
-        }
-      };
-      btn.ondragleave = () => {
-        btn.classList.remove("chip-drag-over");
-      };
+      btn.ondragstart = (e) => { draggedSpaceName = sp; e.dataTransfer.effectAllowed = "move"; };
+      btn.ondragover = (e) => { e.preventDefault(); if (draggedSpaceName && draggedSpaceName !== sp) btn.classList.add("chip-drag-over"); };
+      btn.ondragleave = () => btn.classList.remove("chip-drag-over");
       btn.ondrop = async (e) => {
         e.preventDefault();
         btn.classList.remove("chip-drag-over");
         if (!draggedSpaceName || draggedSpaceName === sp) return;
-
         const nextOrder = [...sortableSpaces];
         const fromIdx = nextOrder.indexOf(draggedSpaceName);
         const toIdx = nextOrder.indexOf(sp);
         if (fromIdx === -1 || toIdx === -1) return;
-
         nextOrder.splice(fromIdx, 1);
         nextOrder.splice(toIdx, 0, draggedSpaceName);
         currentProject.spaceOrder = nextOrder;
@@ -561,11 +573,64 @@ function renderOverview() {
   setupDictPicker();
 
   const galleryHost = document.getElementById("main-gallery-host");
-  if (viewMode === "FOLDER" && filterSpace === "ALL") {
+  if (viewMode === "FOLDER" && filterSpace === "ALL" && !filterReviewOnly) {
     renderFolderGrid(galleryHost, sortedGroups, pages);
   } else {
     renderExpandedSections(galleryHost, sortedGroups, pages);
   }
+}
+
+function renderProjectReviewList() {
+  const host = document.getElementById("project-review-list");
+  if (!host) return;
+  const rows = [];
+  (currentProject.pages || []).forEach((p, pIdx) => {
+    (p.reviewLogs || []).forEach((log, lIdx) => {
+      rows.push({ p, pIdx, log, lIdx });
+    });
+  });
+
+  if (!rows.length) {
+    host.innerHTML = `<div style="color:#6B7280; padding:6px 0;">尚無審圖批改記錄。進入任意圖紙蓋上審圖印章或點「📝 批改記錄」即可自動建立。</div>`;
+    return;
+  }
+
+  host.innerHTML = rows.map(({ p, pIdx, log, lIdx }) => {
+    const isDone = log.status === "DONE";
+    return `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 8px; background:#FFF; border:1px solid ${isDone ? "#BBF7D0" : "#FECACA"}; border-radius:6px;">
+        <div style="flex:1; cursor:pointer;" class="rev-jump-page" data-pidx="${pIdx}">
+          <div style="font-weight:700; color:#1E293B;">
+            ${isDone ? "🟢" : "🔴"} ${p.pageNum || `P${pIdx + 1}`} ${p.space || ""} · ${p.docTypeLabel || ""}
+            <span style="font-weight:400; color:#64748B; font-size:11px; margin-left:4px;">${log.time || ""}</span>
+          </div>
+          <div style="color:${isDone ? "#166534" : "#991B1B"}; margin-top:2px;">${log.note}</div>
+        </div>
+        <button class="btn-outline btn-sm rev-toggle-status" data-pidx="${pIdx}" data-lidx="${lIdx}"
+                style="background:${isDone ? "#DCFCE7" : "#FEE2E2"}; color:${isDone ? "#166534" : "#991B1B"}; border-color:transparent; font-weight:700;">
+          ${isDone ? "✅ 已核對通過" : "🔴 待修改 (點此完成)"}
+        </button>
+      </div>
+    `;
+  }).join("");
+
+  host.querySelectorAll(".rev-jump-page").forEach(el => {
+    el.onclick = () => {
+      activePageIdx = Number(el.dataset.pidx);
+      renderWorkspace();
+    };
+  });
+
+  host.querySelectorAll(".rev-toggle-status").forEach(btn => {
+    btn.onclick = async () => {
+      const p = currentProject.pages[Number(btn.dataset.pidx)];
+      const log = p?.reviewLogs?.[Number(btn.dataset.lidx)];
+      if (!log) return;
+      log.status = log.status === "DONE" ? "PENDING" : "DONE";
+      await saveCurrentProject();
+      renderProjectReviewList();
+    };
+  });
 }
 
 function renderFolderGrid(host, sortedGroups, allPages) {
@@ -577,11 +642,15 @@ function renderFolderGrid(host, sortedGroups, allPages) {
         const coverType = coverPage.docTypeLabel || DOC_TYPE_LABELS[coverPage.docType] || "拍攝";
         const previewThumbs = items.slice(0, 4);
         const extraCount = items.length - 4;
+        const spacePending = items.reduce((s, pg) => s + (pg.reviewLogs || []).filter(r => r.status === "PENDING").length, 0);
 
         return `
           <div style="background:#FFF; border:1.5px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.05);">
             <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:#F8FAFC; border-bottom:1px solid #E2E8F0;">
-              <strong style="font-size:14px; color:#1E293B;">${spaceName}</strong>
+              <div style="display:flex; align-items:center; gap:5px;">
+                <strong style="font-size:14px; color:#1E293B;">${spaceName}</strong>
+                ${spacePending > 0 ? `<span style="font-size:10px; background:#FEE2E2; color:#DC2626; font-weight:700; padding:1px 5px; border-radius:8px;">🔴 ${spacePending}待改</span>` : ""}
+              </div>
               <span style="font-size:11px; font-weight:700; color:#475569; background:#E2E8F0; padding:1px 6px; border-radius:10px;">${items.length}張</span>
             </div>
 
@@ -662,7 +731,7 @@ function renderExpandedSections(host, sortedGroups, allPages) {
                   ${items.length}頁
                 </span>
               </div>
-              ${filterSpace !== "ALL"
+              ${(filterSpace !== "ALL" || filterReviewOnly)
                 ? `<button class="btn-outline btn-sm btn-back-all-folders" style="background:#FFF; padding:2px 7px; font-size:11px;">‹ 全部圖集</button>`
                 : `<span style="font-size:11px; font-weight:600; color:${theme.text}; opacity:0.85;">空間分區</span>`}
             </div>
@@ -673,6 +742,9 @@ function renderExpandedSections(host, sortedGroups, allPages) {
                 const pNum = p.pageNum || `P${realIdx + 1}`;
                 const tLbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
                 const count = (p.lines || []).length + (p.markers || []).length + (p.paths || []).length;
+                const pLogs = Array.isArray(p.reviewLogs) ? p.reviewLogs : [];
+                const pendingCnt = pLogs.filter(r => r.status === "PENDING").length;
+                const doneCnt = pLogs.filter(r => r.status === "DONE").length;
                 const shortDate = (p.date || "").slice(5);
                 return `
                   <div class="page-grid-card" data-open-idx="${realIdx}"
@@ -687,9 +759,14 @@ function renderExpandedSections(host, sortedGroups, allPages) {
                       ${p.sitePhotoUrl
                         ? `<img src="${p.sitePhotoUrl}" style="width:100%; height:100%; object-fit:contain;" />`
                         : `<span style="color:#94A3B8; font-size:12px;">尚未上傳圖紙</span>`}
-                      ${count > 0
-                        ? `<span style="position:absolute; top:5px; right:5px; background:#1E293B; color:#FFF; font-size:10px; padding:1px 5px; border-radius:3px;">📐 ${count}標註</span>`
-                        : ""}
+                      <div style="position:absolute; top:5px; right:5px; display:flex; flex-direction:column; gap:3px; align-items:flex-end;">
+                        ${pendingCnt > 0
+                          ? `<span style="background:#DC2626; color:#FFF; font-size:10px; font-weight:700; padding:1px 5px; border-radius:3px;">🔴 ${pendingCnt}項待改</span>`
+                          : (doneCnt > 0 ? `<span style="background:#059669; color:#FFF; font-size:10px; font-weight:700; padding:1px 5px; border-radius:3px;">🟢 審圖通過</span>` : "")}
+                        ${count > 0
+                          ? `<span style="background:#1E293B; color:#FFF; font-size:10px; padding:1px 5px; border-radius:3px;">📐 ${count}標註</span>`
+                          : ""}
+                      </div>
                       ${(shortDate || p.author)
                         ? `<span style="position:absolute; bottom:5px; right:5px; background:rgba(255,255,255,0.92); color:#475569; font-size:10px; padding:1px 5px; border-radius:3px; border:1px solid #CBD5E1;">${shortDate} ${p.author || ""}</span>`
                         : ""}
@@ -705,7 +782,7 @@ function renderExpandedSections(host, sortedGroups, allPages) {
   `;
 
   host.querySelectorAll(".btn-back-all-folders").forEach(btn => {
-    btn.onclick = () => { filterSpace = "ALL"; viewMode = "FOLDER"; renderOverview(); };
+    btn.onclick = () => { filterSpace = "ALL"; filterReviewOnly = false; viewMode = "FOLDER"; renderOverview(); };
   });
   host.querySelectorAll("[data-open-idx]").forEach(card => {
     card.onclick = () => { activePageIdx = Number(card.dataset.openIdx); renderWorkspace(); };
@@ -757,14 +834,15 @@ function setupDictPicker() {
       space: spaceVal,
       docTypeLabel: docTypeVal,
       title: `${spaceVal} · ${docTypeVal}`,
-      sitePhotoUrl: "",
+      sitePhotoUrl: docTypeVal === "白底草圖" ? createBlankWhiteDataUrl() : "",
       designPhotoUrl: "",
       lines: [],
       markers: [],
       paths: [],
       walls: [],
       pins: [],
-      stickers: []
+      stickers: [],
+      reviewLogs: []
     });
     activePageIdx = currentProject.pages.length - 1;
     await saveCurrentProject();
@@ -772,10 +850,21 @@ function setupDictPicker() {
   };
 }
 
+function createBlankWhiteDataUrl() {
+  const c = document.createElement("canvas");
+  c.width = 1600;
+  c.height = 1200;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillRect(0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.92);
+}
+
 function renderSinglePageEditor(page) {
   const totalPages = currentProject.pages.length;
+  const pageTitleText = `${page.pageNum || `P${activePageIdx + 1}`} ${page.space || ""} · ${page.docTypeLabel || ""}`.trim();
+  if (!Array.isArray(page.reviewLogs)) page.reviewLogs = [];
 
-  // 真．滿版全螢幕工作區（覆蓋整個視窗，左右白邊歸零）
   root.innerHTML = `
     <div id="fullscreen-editor-shell" style="position:fixed; inset:0; width:100vw; height:100vh; background:#0F172A; display:flex; flex-direction:column; z-index:900; overflow:hidden;">
       <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 10px; background:#111827; border-bottom:1px solid #374151; flex-wrap:wrap; gap:6px; z-index:20;">
@@ -783,11 +872,18 @@ function renderSinglePageEditor(page) {
           <button id="btn-back-grid" style="background:#FACC15; color:#111827; border:none; border-radius:6px; padding:4px 11px; font-size:13px; font-weight:800; cursor:pointer; box-shadow:0 2px 6px rgba(250,204,21,0.35);">
             ‹ 返回圖集
           </button>
-          <strong style="font-size:14px; color:#F9FAFB;">${page.pageNum || ""} ${page.space || ""} · ${page.docTypeLabel || ""}</strong>
+          <strong style="font-size:14px; color:#F9FAFB;">${pageTitleText}</strong>
           <span style="font-size:12px; color:#9CA3AF;">(${activePageIdx + 1}/${totalPages})</span>
+          <button id="btn-toggle-white-bg" title="切換白底批改草圖畫布"
+                  style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:3px 9px; font-size:12px; font-weight:800; cursor:pointer;">
+            📄 白底
+          </button>
         </div>
 
         <div style="display:flex; align-items:center; gap:6px;">
+          <button id="btn-page-review-drawer" style="background:#7F1D1D; color:#FECACA; border:1px solid #EF4444; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer;">
+            📝 批改記錄 (${page.reviewLogs.length})
+          </button>
           <button id="btn-manual-save" style="background:#10B981; color:#FFF; border:none; border-radius:6px; padding:4px 11px; font-size:12px; font-weight:800; cursor:pointer;">
             💾 儲存
           </button>
@@ -798,9 +894,85 @@ function renderSinglePageEditor(page) {
         </div>
       </div>
 
+      <!-- 單頁批改記錄懸浮抽屜 -->
+      <div id="page-review-drawer" class="hidden" style="position:absolute; right:12px; top:44px; width:310px; max-height:70vh; overflow-y:auto; background:#1F2937; color:#F9FAFB; border:1px solid #4B5563; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(0,0,0,0.55); z-index:40; display:flex; flex-direction:column; gap:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #374151; padding-bottom:5px;">
+          <strong style="font-size:12px; color:#FCA5A5;">📝 本頁審圖批改記錄</strong>
+          <button id="btn-close-page-rev" style="background:none; border:none; color:#9CA3AF; font-size:14px; cursor:pointer;">✕</button>
+        </div>
+        <div style="display:flex; gap:4px;">
+          <input type="text" id="new-rev-note" placeholder="輸入批改要求（如：收口改35mm）"
+                 style="flex:1; padding:5px 7px; border-radius:5px; border:1px solid #4B5563; background:#111827; color:#FFF; font-size:12px;" />
+          <button id="btn-add-rev-note" style="background:#EF4444; color:#FFF; border:none; border-radius:5px; padding:0 9px; font-size:12px; font-weight:700; cursor:pointer;">新增</button>
+        </div>
+        <div id="page-rev-items" style="display:flex; flex-direction:column; gap:5px; font-size:12px;"></div>
+      </div>
+
       <div id="sub-module-host" style="flex:1; width:100%; height:100%; position:relative; overflow:hidden;"></div>
     </div>
   `;
+
+  const renderPageRevItems = () => {
+    const listEl = document.getElementById("page-rev-items");
+    const badgeBtn = document.getElementById("btn-page-review-drawer");
+    if (badgeBtn) badgeBtn.textContent = `📝 批改記錄 (${page.reviewLogs.length})`;
+    if (!listEl) return;
+    if (!page.reviewLogs.length) {
+      listEl.innerHTML = `<div style="color:#9CA3AF; font-size:11px;">尚無批改記錄，可在上方輸入或直接蓋審圖印章。</div>`;
+      return;
+    }
+    listEl.innerHTML = page.reviewLogs.map((r, i) => {
+      const isDone = r.status === "DONE";
+      return `
+        <div style="background:#111827; border:1px solid ${isDone ? "#059669" : "#DC2626"}; border-radius:6px; padding:6px 8px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
+          <div style="flex:1;">
+            <div style="font-size:10px; color:#9CA3AF;">${r.time || ""}</div>
+            <div style="color:${isDone ? "#6EE7B7" : "#FCA5A5"}; font-weight:700;">${r.note}</div>
+          </div>
+          <button class="page-rev-toggle" data-ridx="${i}" style="background:${isDone ? "#065F46" : "#991B1B"}; color:#FFF; border:none; border-radius:4px; padding:3px 6px; font-size:10px; cursor:pointer;">
+            ${isDone ? "🟢 已通過" : "🔴 待改"}
+          </button>
+          <button class="page-rev-del" data-ridx="${i}" style="background:none; border:none; color:#9CA3AF; font-size:12px; cursor:pointer;">✕</button>
+        </div>
+      `;
+    }).join("");
+
+    listEl.querySelectorAll(".page-rev-toggle").forEach(b => {
+      b.onclick = async () => {
+        const item = page.reviewLogs[Number(b.dataset.ridx)];
+        if (item) item.status = item.status === "DONE" ? "PENDING" : "DONE";
+        renderPageRevItems();
+        await saveCurrentProject();
+      };
+    });
+    listEl.querySelectorAll(".page-rev-del").forEach(b => {
+      b.onclick = async () => {
+        page.reviewLogs.splice(Number(b.dataset.ridx), 1);
+        renderPageRevItems();
+        await saveCurrentProject();
+      };
+    });
+  };
+
+  renderPageRevItems();
+
+  document.getElementById("btn-page-review-drawer").onclick = () => {
+    document.getElementById("page-review-drawer").classList.toggle("hidden");
+  };
+  document.getElementById("btn-close-page-rev").onclick = () => {
+    document.getElementById("page-review-drawer").classList.add("hidden");
+  };
+  document.getElementById("btn-add-rev-note").onclick = async () => {
+    const inp = document.getElementById("new-rev-note");
+    const txt = inp.value.trim();
+    if (!txt) return;
+    const now = new Date();
+    const tStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    page.reviewLogs.unshift({ time: tStr, note: txt, status: "PENDING" });
+    inp.value = "";
+    renderPageRevItems();
+    await saveCurrentProject();
+  };
 
   const saveAndRun = async (fn) => {
     if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
@@ -810,9 +982,7 @@ function renderSinglePageEditor(page) {
 
   document.getElementById("btn-back-grid").onclick = () => {
     saveAndRun(() => {
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
-      }
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
       activePageIdx = -1;
       renderWorkspace();
     });
@@ -827,11 +997,24 @@ function renderSinglePageEditor(page) {
     setTimeout(() => { saveBtn.textContent = "💾 儲存"; }, 1400);
   };
 
+  // 白底切換按鈕
+  const whiteBtn = document.getElementById("btn-toggle-white-bg");
+  whiteBtn.onclick = () => {
+    if (!activeCanvasInstance) {
+      page.sitePhotoUrl = createBlankWhiteDataUrl();
+      showMeasure();
+      return;
+    }
+    const isWhite = activeCanvasInstance.toggleWhiteBackground();
+    whiteBtn.style.background = isWhite ? "#FACC15" : "#F8FAFC";
+    whiteBtn.textContent = isWhite ? "🖼️ 還原底圖" : "📄 白底";
+  };
+
   const host = document.getElementById("sub-module-host");
 
   const showMeasure = () => {
     if (!page.sitePhotoUrl) {
-      host.innerHTML = `<div style="color:#E5E7EB; text-align:center; padding:40px; font-size:15px;">請先點擊右上角「📷 換底圖」拍照或選取底圖開始拉尺。</div>`;
+      host.innerHTML = `<div style="color:#E5E7EB; text-align:center; padding:40px; font-size:15px;">請先點擊右上角「📷 換底圖」拍照，或按上方「📄 白底」直接開白底草圖。</div>`;
       return;
     }
     activeCanvasInstance = new MeasureCanvas(
@@ -856,9 +1039,16 @@ function renderSinglePageEditor(page) {
           page.sitePhotoUrl = updated.mergedBaseUrl;
           memoryPhotoCache.set(page.id, updated.mergedBaseUrl);
         }
+        if (updated.newReviewNote) {
+          const now = new Date();
+          const tStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+          page.reviewLogs.unshift({ time: tStr, note: updated.newReviewNote, status: "PENDING" });
+          renderPageRevItems();
+        }
         await saveCurrentProject();
       },
       {
+        pageTitle: pageTitleText,
         hasPrev: activePageIdx > 0,
         hasNext: activePageIdx < totalPages - 1,
         onPrev: () => {
