@@ -1,0 +1,43 @@
+/* 拉尺 5 色選色器 */
+.swatch-bar { display: flex; gap: 10px; align-items: center; }
+.swatch-btn {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 2px solid transparent; cursor: pointer;
+}
+.swatch-btn.selected {
+  outline: 2px solid #111827;
+  outline-offset: 2px;
+}
+
+/* 無邊框半透明磨砂數字標籤（小螢幕防重疊） */
+.dim-pill-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 2px 5px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  font-size: 13px;
+  line-height: 1.1;
+  white-space: nowrap;
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.95), 0 0 2px #FFFFFF;
+  user-select: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+/* 已勾選「納入報告」的重點編號徽章 */
+.dim-report-badge {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 4px;
+  background: #DC2626;
+  color: #FFFFFF;
+  border-radius: 2px;
+  font-size: 11px;
+  text-shadow: none;
+}
