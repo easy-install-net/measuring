@@ -126,4 +126,126 @@ function renderWorkspace() {
   }
 }
 
-function
+function setupDictPicker() {
+  let selSpace = "";
+  let selCab = "";
+  const titleInput = document.getElementById("custom-page-title");
+  const updateTitle = () => {
+    titleInput.value = [selSpace, selCab].filter(Boolean).join(" · ");
+  };
+
+  const spaceItems = masterDict.spaceGroups.flatMap(g => g.items);
+  const cabItems = masterDict.cabinetGroups.flatMap(g => g.items);
+
+  document.getElementById("picker-spaces").innerHTML = spaceItems.map(i =>
+    `<button type="button" class="chip ${i.pinned ? "chip-pinned" : ""}" data-sp="${i.name}">${i.name}</button>`
+  ).join("");
+
+  document.getElementById("picker-cabs").innerHTML = cabItems.map(i =>
+    `<button type="button" class="chip ${i.pinned ? "chip-pinned" : ""}" data-cb="${i.name}">${i.name}</button>`
+  ).join("");
+
+  document.querySelectorAll("[data-sp]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("[data-sp]").forEach(x => x.classList.remove("active"));
+    selSpace = selSpace === b.dataset.sp ? "" : b.dataset.sp;
+    if (selSpace) b.classList.add("active");
+    updateTitle();
+  });
+
+  document.querySelectorAll("[data-cb]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("[data-cb]").forEach(x => x.classList.remove("active"));
+    selCab = selCab === b.dataset.cb ? "" : b.dataset.cb;
+    if (selCab) b.classList.add("active");
+    updateTitle();
+  });
+
+  document.getElementById("btn-confirm-page").onclick = async () => {
+    const title = titleInput.value.trim();
+    if (!title) return;
+    currentProject.pages.push({
+      id: "PG_" + Date.now(),
+      title,
+      sitePhotoUrl: "",
+      designPhotoUrl: "",
+      lines: [],
+      auditTickets: []
+    });
+    activePageIdx = currentProject.pages.length - 1;
+    await saveCurrentProject();
+    renderWorkspace();
+  };
+}
+
+function renderActivePage(page) {
+  const workArea = document.getElementById("page-work-area");
+  workArea.innerHTML = `
+    <div class="card" style="display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center;">
+      <div style="display:flex; gap:8px;">
+        <button id="mode-measure" class="btn-solid btn-sm">📐 現場拉尺模式</button>
+        <button id="mode-audit" class="btn-outline btn-sm">🔍 上下分屏審圖</button>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <label class="btn-outline btn-sm" style="cursor:pointer;">
+          📷 上傳現場圖
+          <input type="file" id="up-site-photo" accept="image/*" class="hidden" />
+        </label>
+        <label class="btn-outline btn-sm" style="cursor:pointer;">
+          📄 上傳設計圖
+          <input type="file" id="up-design-photo" accept="image/*" class="hidden" />
+        </label>
+      </div>
+    </div>
+    <div id="sub-module-host"></div>
+  `;
+
+  const host = document.getElementById("sub-module-host");
+  const btnMeasure = document.getElementById("mode-measure");
+  const btnAudit = document.getElementById("mode-audit");
+
+  const showMeasure = () => {
+    btnMeasure.className = "btn-solid btn-sm";
+    btnAudit.className = "btn-outline btn-sm";
+    if (!page.sitePhotoUrl) {
+      host.innerHTML = `<div class="card" style="color:#4B5563; text-align:center; padding:30px;">請先點擊上方「📷 上傳現場圖」拍照或選取底圖開始拉尺。</div>`;
+      return;
+    }
+    new MeasureCanvas(host, page.sitePhotoUrl, page.lines || [], masterDict.rulerColors, async (updatedLines) => {
+      page.lines = updatedLines;
+      await saveCurrentProject();
+    });
+  };
+
+  const showAudit = () => {
+    btnAudit.className = "btn-solid btn-sm";
+    btnMeasure.className = "btn-outline btn-sm";
+    renderAuditSplitView(host, page, async (updatedTickets) => {
+      page.auditTickets = updatedTickets;
+      await saveCurrentProject();
+    });
+  };
+
+  btnMeasure.onclick = showMeasure;
+  btnAudit.onclick = showAudit;
+
+  document.getElementById("up-site-photo").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    host.innerHTML = `<div class="card">正在壓縮並同步現場圖至雲端...</div>`;
+    const res = await uploadMediaToCloud(currentProject.id, page.id, file);
+    page.sitePhotoUrl = res.imageData;
+    await saveCurrentProject();
+    showMeasure();
+  };
+
+  document.getElementById("up-design-photo").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    host.innerHTML = `<div class="card">正在壓縮並同步設計圖至雲端...</div>`;
+    const res = await uploadMediaToCloud(currentProject.id, page.id, file);
+    page.designPhotoUrl = res.imageData;
+    await saveCurrentProject();
+    showAudit();
+  };
+
+  showMeasure();
+}
