@@ -56,6 +56,7 @@ async function renderProjectList() {
         <strong style="font-size:14px;">從舊系統（site_projects）唯讀匯入工程</strong>
         <button id="btn-close-legacy" class="btn-outline btn-sm">關閉</button>
       </div>
+      <div id="legacy-status-msg" style="font-size:12px; color:#DC2626; margin-bottom:6px;"></div>
       <div id="legacy-list" style="display:flex; flex-direction:column; gap:6px; font-size:13px; color:#4B5563;">
         載入中...
       </div>
@@ -99,171 +100,172 @@ async function renderProjectList() {
 async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
   if (!mediaDocId) return "";
   if (mediaMeta && mediaMeta.photo) return mediaMeta.photo;
-  if (!mediaMeta || !mediaMeta.chunked) return "";
-  try {
-    const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
-    const list = [];
-    chunksSnap.forEach(c => list.push(c.data()));
-    list.sort((a, b) => (a.index || 0) - (b.index || 0));
-    return list.map(c => c.data || "").join("");
-  } catch (_) {
-    return "";
+  const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
+  const list = [];
+  chunksSnap.forEach(c => list.push(c.data()));
+  if (!list.length) return "";
+  list.sort((a, b) => (a.index || 0) - (b.index || 0));
+  let combined = list.map(c => c.data || "").join("");
+  if (combined && !combined.startsWith("data:image") && !combined.startsWith("http")) {
+    combined = "data:image/jpeg;base64," + combined;
   }
+  return combined;
 }
 
 async function openLegacyImporter() {
   const box = document.getElementById("legacy-import-box");
   const listEl = document.getElementById("legacy-list");
+  const statusEl = document.getElementById("legacy-status-msg");
   box.classList.remove("hidden");
+  statusEl.textContent = "";
   listEl.innerHTML = `正在讀取舊系統工程清單...`;
 
-  const snap = await getDocs(collection(db, "site_projects"));
-  const legacyItems = [];
-  snap.forEach(d => legacyItems.push({ docId: d.id, ...d.data() }));
-  legacyItems.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  try {
+    const snap = await getDocs(collection(db, "site_projects"));
+    const legacyItems = [];
+    snap.forEach(d => legacyItems.push({ docId: d.id, ...d.data() }));
+    legacyItems.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
 
-  if (!legacyItems.length) {
-    listEl.innerHTML = `舊系統目前沒有工程資料。`;
-    return;
-  }
+    if (!legacyItems.length) {
+      listEl.innerHTML = `舊系統目前沒有工程資料。`;
+      return;
+    }
 
-  listEl.innerHTML = legacyItems.map((item, idx) => {
-    const title = (item.name || item.title || "未命名工程").trim();
-    const code = item.code || item.docId;
-    const dateStr = item.date ? ` · ${item.date}` : "";
-    return `
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; background:#FFF; border:1px solid #D1D5DB; border-radius:4px;">
-        <div>
-          <div style="font-weight:700; color:#111827;">${title}</div>
-          <div style="font-size:12px; color:#6B7280;">編號：${code}${dateStr}</div>
+    listEl.innerHTML = legacyItems.map((item, idx) => {
+      const title = (item.name || item.title || "未命名工程").trim();
+      const code = item.code || item.docId;
+      const dateStr = item.date ? ` · ${item.date}` : "";
+      const pgCount = Array.isArray(item.pageIds) ? item.pageIds.length : 0;
+      return `
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; background:#FFF; border:1px solid #D1D5DB; border-radius:4px;">
+          <div>
+            <div style="font-weight:700; color:#111827;">${title}</div>
+            <div style="font-size:12px; color:#6B7280;">編號：${code}${dateStr} · 記錄 ${pgCount} 頁</div>
+          </div>
+          <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入並還原圖集</button>
         </div>
-        <button class="btn-solid btn-sm legacy-do-import" data-idx="${idx}">匯入並還原圖集</button>
-      </div>
-    `;
-  }).join("");
+      `;
+    }).join("");
 
-  listEl.querySelectorAll(".legacy-do-import").forEach(btn => {
-    btn.onclick = async () => {
-      const target = legacyItems[Number(btn.dataset.idx)];
-      btn.disabled = true;
-      btn.textContent = "讀取分頁與圖庫中...";
+    listEl.querySelectorAll(".legacy-do-import").forEach(btn => {
+      btn.onclick = async () => {
+        const target = legacyItems[Number(btn.dataset.idx)];
+        btn.disabled = true;
+        btn.textContent = "讀取子集合中...";
+        statusEl.textContent = "";
 
-      const [pagesSnap, mediaSnap] = await Promise.all([
-        getDocs(collection(db, "site_projects", String(target.docId), "pages")),
-        getDocs(collection(db, "site_projects", String(target.docId), "media"))
-      ]);
+        try {
+          const [pagesSnap, mediaSnap] = await Promise.all([
+            getDocs(collection(db, "site_projects", String(target.docId), "pages")),
+            getDocs(collection(db, "site_projects", String(target.docId), "media"))
+          ]);
 
-      const rawPagesMap = {};
-      // 1. 先從主文件內的 pages 陣列或物件讀取（兼容舊版儲存格式）
-      if (Array.isArray(target.pages)) {
-        target.pages.forEach((p, idx) => {
-          const pid = String(p.id || `pg_${idx}`);
-          rawPagesMap[pid] = { docId: pid, ...p };
-        });
-      } else if (target.pages && typeof target.pages === "object") {
-        Object.entries(target.pages).forEach(([k, p]) => {
-          const pid = String(p.id || k);
-          rawPagesMap[pid] = { docId: pid, ...p };
-        });
-      }
+          if (pagesSnap.empty && mediaSnap.empty) {
+            statusEl.textContent = `⚠️ 讀取到 pages=0, media=0！`;
+            btn.disabled = false;
+            btn.textContent = "重試匯入";
+            return;
+          }
 
-      // 2. 再從 pages 子集合合併最新資料
-      pagesSnap.forEach(d => {
-        const data = d.data() || {};
-        rawPagesMap[d.id] = { ...(rawPagesMap[d.id] || {}), docId: d.id, ...data };
-      });
+          const rawPagesMap = {};
+          pagesSnap.forEach(d => {
+            rawPagesMap[String(d.id)] = { docId: String(d.id), ...d.data() };
+          });
 
-      const mediaMetaMap = new Map();
-      const mediaIdsList = [];
-      mediaSnap.forEach(m => {
-        const idStr = String(m.id);
-        mediaMetaMap.set(idStr, m.data() || {});
-        mediaIdsList.push(idStr);
-      });
+          const mediaMetaMap = new Map();
+          const mediaIdsList = [];
+          mediaSnap.forEach(m => {
+            const idStr = String(m.id);
+            mediaMetaMap.set(idStr, m.data() || {});
+            mediaIdsList.push(idStr);
+          });
 
-      const deletedSet = new Set((target.deletedPageIds || []).map(String));
-      const orderedIds = Array.isArray(target.pageIds) && target.pageIds.length > 0
-        ? target.pageIds.map(String).filter(id => rawPagesMap[id] && !deletedSet.has(id))
-        : Object.keys(rawPagesMap).filter(id => !deletedSet.has(id));
+          const deletedSet = new Set((target.deletedPageIds || []).map(String));
+          const orderedIds = Array.isArray(target.pageIds) && target.pageIds.length > 0
+            ? target.pageIds.map(String).filter(id => rawPagesMap[id] && !deletedSet.has(id))
+            : Object.keys(rawPagesMap).filter(id => !deletedSet.has(id));
 
-      Object.keys(rawPagesMap).forEach(id => {
-        if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
-      });
+          Object.keys(rawPagesMap).forEach(id => {
+            if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
+          });
 
-      const photoCache = new Map();
-      const getCachedPhoto = async (mId) => {
-        if (!mId) return "";
-        if (photoCache.has(mId)) return photoCache.get(mId);
-        const url = await resolveLegacyMediaPhoto(target.docId, mId, mediaMetaMap.get(mId));
-        photoCache.set(mId, url);
-        return url;
+          const photoCache = new Map();
+          const getCachedPhoto = async (mId) => {
+            if (!mId) return "";
+            if (photoCache.has(mId)) return photoCache.get(mId);
+            const url = await resolveLegacyMediaPhoto(target.docId, mId, mediaMetaMap.get(mId));
+            photoCache.set(mId, url);
+            return url;
+          };
+
+          const convertedPages = [];
+          for (let i = 0; i < orderedIds.length; i++) {
+            btn.textContent = `還原圖紙 (${i + 1}/${orderedIds.length})...`;
+            const pg = rawPagesMap[orderedIds[i]];
+            const pageIdStr = String(pg.id || pg.docId);
+
+            const rawSpace = (Array.isArray(pg.spaces) && pg.spaces[0]) ? pg.spaces[0] : (pg.space || "");
+            const spaceName = String(rawSpace).trim() || "未標空間";
+
+            const rawDocType = pg.docType || "photo";
+            const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
+
+            let imgUrl = "";
+            if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) {
+              imgUrl = await getCachedPhoto(String(pg.photoId));
+            }
+            if (!imgUrl && mediaMetaMap.has("page_" + pageIdStr)) {
+              imgUrl = await getCachedPhoto("page_" + pageIdStr);
+            }
+            if (!imgUrl && pg.photo) {
+              imgUrl = pg.photo;
+            }
+            if (!imgUrl && mediaIdsList[i]) {
+              imgUrl = await getCachedPhoto(mediaIdsList[i]);
+            }
+
+            convertedPages.push({
+              id: pageIdStr,
+              pageNum: `P${i + 1}`,
+              space: spaceName,
+              docType: rawDocType,
+              docTypeLabel: typeLabel,
+              title: `${spaceName} · ${typeLabel}`,
+              author: pg.author || target.lastModifiedBy || "",
+              date: pg.date || target.date || "",
+              sitePhotoUrl: imgUrl,
+              designPhotoUrl: "",
+              lines: Array.isArray(pg.lines) ? pg.lines : [],
+              markers: Array.isArray(pg.markers) ? pg.markers : [],
+              pins: Array.isArray(pg.pins) ? pg.pins : [],
+              auditTickets: []
+            });
+          }
+
+          const newId = "P_" + Date.now();
+          const baseName = (target.name || target.title || "未命名工程").trim();
+          const codeTag = target.code ? ` (${target.code})` : "";
+          const newProj = {
+            id: newId,
+            name: baseName + codeTag,
+            legacySourceId: String(target.docId),
+            spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
+            pages: convertedPages,
+            updatedAt: Date.now()
+          };
+
+          await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), newProj);
+          openProject(newProj);
+        } catch (err) {
+          statusEl.textContent = `❌ 匯入失敗：${err.message || err}`;
+          btn.disabled = false;
+          btn.textContent = "重試匯入";
+        }
       };
-
-      const convertedPages = [];
-      for (let i = 0; i < orderedIds.length; i++) {
-        btn.textContent = `還原圖紙 (${i + 1}/${orderedIds.length})...`;
-        const pg = rawPagesMap[orderedIds[i]];
-        const pageIdStr = String(pg.id || pg.docId);
-
-        const rawSpace = (Array.isArray(pg.spaces) && pg.spaces[0]) ? pg.spaces[0] : (pg.space || "");
-        const spaceName = String(rawSpace).trim() || "未標空間";
-
-        const rawDocType = pg.docType || "photo";
-        const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
-
-        // 多重對應圖片：pg.photoId -> 'page_' + id -> 依順序對應 mediaIdsList -> pg.photo
-        let imgUrl = "";
-        if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) {
-          imgUrl = await getCachedPhoto(String(pg.photoId));
-        }
-        if (!imgUrl && mediaMetaMap.has("page_" + pageIdStr)) {
-          imgUrl = await getCachedPhoto("page_" + pageIdStr);
-        }
-        if (!imgUrl && pg.photo) {
-          imgUrl = pg.photo;
-        }
-        if (!imgUrl && mediaIdsList[i]) {
-          imgUrl = await getCachedPhoto(mediaIdsList[i]);
-        }
-
-        const oldLines = Array.isArray(pg.lines) ? pg.lines : [];
-        const oldMarkers = Array.isArray(pg.markers) ? pg.markers : [];
-        const oldPins = Array.isArray(pg.pins) ? pg.pins : [];
-
-        convertedPages.push({
-          id: pageIdStr,
-          pageNum: `P${i + 1}`,
-          space: spaceName,
-          docType: rawDocType,
-          docTypeLabel: typeLabel,
-          title: `${spaceName} · ${typeLabel}`,
-          author: pg.author || target.lastModifiedBy || "",
-          date: pg.date || target.date || "",
-          sitePhotoUrl: imgUrl,
-          designPhotoUrl: "",
-          lines: oldLines,
-          markers: oldMarkers,
-          pins: oldPins,
-          auditTickets: []
-        });
-      }
-
-      const newId = "P_" + Date.now();
-      const baseName = (target.name || target.title || "未命名工程").trim();
-      const codeTag = target.code ? ` (${target.code})` : "";
-      const newProj = {
-        id: newId,
-        name: baseName + codeTag,
-        legacySourceId: String(target.docId),
-        spaceOrder: Array.isArray(target.spaceOrder) ? target.spaceOrder : [],
-        pages: convertedPages,
-        updatedAt: Date.now()
-      };
-
-      await setDoc(doc(db, COLLECTIONS.PROJECTS, newId), newProj);
-      openProject(newProj);
-    };
-  });
+    });
+  } catch (e) {
+    statusEl.textContent = `❌ 讀取舊清單失敗：${e.message || e}`;
+  }
 }
 
 function openProject(proj) {
