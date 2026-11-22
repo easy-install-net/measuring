@@ -187,7 +187,7 @@ export class MeasureCanvas {
   initUI() {
     this.container.innerHTML = `
       <div class="mc-wrapper" style="width:100%; height:100%; background:#0F172A; display:flex; flex-direction:column; user-select:none; overflow:hidden;">
-        <!-- 頂部單行極簡工具列：拉桿改為極簡「字」「粗」並向右靠攏靠近色盤 -->
+        <!-- 頂部單行極簡工具列 -->
         <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 10px; background:#1F2937; border-bottom:1px solid #374151; flex-wrap:wrap; gap:8px; z-index:20;">
           <div style="flex:1;"></div>
 
@@ -212,7 +212,7 @@ export class MeasureCanvas {
             </div>
           </div>
 
-          <!-- 最右側：純圖示按鈕（含全合併 📌、重置視角、復原、重做、下載圖紙、全螢幕） -->
+          <!-- 最右側：全合併 📌 + 純圖示按鈕 -->
           <div style="flex:1; display:flex; justify-content:flex-end; align-items:center; gap:5px;">
             <button type="button" id="mc-merge-all" title="全合併：將所有標註壓進底圖並清空零碎記錄" style="background:#065F46; color:#ECFDF5; border:1px solid #10B981; border-radius:5px; padding:0 7px; height:26px; font-size:11px; font-weight:800; cursor:pointer;">📌 全合併</button>
             <button type="button" id="mc-fit" title="重置視角" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:28px; height:26px; font-size:14px; cursor:pointer;">⊡</button>
@@ -264,6 +264,17 @@ export class MeasureCanvas {
             </button>
           </div>
 
+          <!-- 貼圖雙模式小選單（剪貼簿貼上 ＋ 選擇圖片檔案） -->
+          <div id="mc-sticker-menu" class="hidden" style="position:absolute; left:50%; top:64px; transform:translateX(-50%); background:rgba(17,24,39,0.96); border:1px solid #4B5563; border-radius:10px; padding:6px; box-shadow:0 12px 28px rgba(0,0,0,0.55); z-index:24; display:flex; gap:6px; align-items:center;">
+            <button type="button" id="mc-paste-clipboard-btn" style="background:#2563EB; color:#FFF; border:none; border-radius:6px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap;">
+              📋 貼上剪貼簿圖片
+            </button>
+            <button type="button" id="mc-pick-sticker-file-btn" style="background:#374151; color:#F9FAFB; border:1px solid #4B5563; border-radius:6px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap;">
+              📁 選擇圖片檔案
+            </button>
+            <button type="button" id="mc-close-sticker-menu" style="background:none; border:none; color:#9CA3AF; font-size:14px; cursor:pointer; padding:0 4px;">✕</button>
+          </div>
+
           <!-- 就地直接打字輸入框 -->
           <input type="text" id="mc-inline-input" class="hidden" autocomplete="off" spellcheck="false"
                  style="position:absolute; transform:translate(-50%, -50%); background:rgba(15,23,42,0.82); border:1.5px dashed #38BDF8; border-radius:4px; padding:1px 6px; text-align:center; font-weight:800; outline:none; z-index:25; min-width:56px;" />
@@ -286,7 +297,7 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 極簡隨身迷你控制條（點合併 📌 合併底圖 + 單一物件獨立縮放） -->
+          <!-- 極簡隨身迷你控制條 -->
           <div id="mc-obj-hud" class="hidden" style="position:absolute; left:50%; bottom:16px; transform:translateX(-50%); background:rgba(17,24,39,0.92); border:1px solid rgba(96,165,250,0.65); border-radius:10px; padding:6px 10px; box-shadow:0 8px 20px rgba(0,0,0,0.45); z-index:18; display:flex; align-items:center; gap:10px;">
             <div id="mc-obj-font-row" class="hidden" style="display:flex; align-items:center; gap:5px;">
               <span style="font-size:11px; color:#E5E7EB; font-weight:700;">字</span>
@@ -307,7 +318,6 @@ export class MeasureCanvas {
               <button type="button" id="mc-calc-close" style="background:none; border:none; color:#9CA3AF; font-size:12px; cursor:pointer; padding:0 2px;">✕</button>
             </div>
 
-            <!-- 10 行計算歷史記錄區 -->
             <div id="mc-calc-hist" style="height:112px; overflow-y:auto; background:#0B1120; border:1px solid #1E293B; border-radius:5px; padding:3px 5px; display:flex; flex-direction:column; gap:2px; font-size:10px; color:#94A3B8;">
               <div style="color:#475569; text-align:center; padding-top:36px;">尚無計算記錄</div>
             </div>
@@ -340,6 +350,33 @@ export class MeasureCanvas {
     this.bindGlobalShortcuts();
     this.bindPointerEvents();
     window.addEventListener("resize", () => { this.render(); this.positionInline(); });
+  }
+
+  async pasteFromClipboardButton() {
+    const menu = document.getElementById("mc-sticker-menu");
+    if (menu) menu.classList.add("hidden");
+    if (!navigator.clipboard || !navigator.clipboard.read) {
+      alert("目前瀏覽器不支援按鈕直接讀取剪貼簿，請直接按鍵盤 Ctrl + V（或長按貼上）貼圖！");
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      let foundImg = false;
+      for (const item of items) {
+        const imgType = item.types.find(t => t.startsWith("image/"));
+        if (imgType) {
+          const blob = await item.getType(imgType);
+          this.addStickerFile(blob);
+          foundImg = true;
+          break;
+        }
+      }
+      if (!foundImg) {
+        alert("剪貼簿裡目前沒有圖片（請先截圖或複製圖片後再按貼上）。");
+      }
+    } catch (_) {
+      alert("請允許網頁讀取剪貼簿權限，或直接按鍵盤 Ctrl + V 貼上圖片！");
+    }
   }
 
   makeDraggable(boxEl, handleEl) {
@@ -548,7 +585,6 @@ export class MeasureCanvas {
     this.inlineInput.addEventListener("blur", () => { if (this.inlineState) this.commitInline(true); });
   }
 
-  // 繪製底層底圖（含白底模式支援）
   paintBaseLayer(ctx) {
     if (this.isWhiteBg) {
       ctx.fillStyle = "#FFFFFF";
@@ -558,7 +594,6 @@ export class MeasureCanvas {
     }
   }
 
-  // 點合併：只把當前選中的單一物件壓進底圖，並移除該物件的獨立記錄
   mergeSelectedObjectIntoBase() {
     if (!this.selectedObj || !this.img) return;
     const { type, idx } = this.selectedObj;
@@ -606,7 +641,6 @@ export class MeasureCanvas {
     }
   }
 
-  // 全合併：把所有標註全部壓平進底圖，並清空所有零碎標註記錄
   mergeAllIntoBase() {
     if (!this.img) return;
     const totalCount = this.lines.length + this.markers.length + this.paths.length + this.stickers.length;
@@ -655,7 +689,6 @@ export class MeasureCanvas {
     }
   }
 
-  // 下載匯出圖紙（直接以當前頁面的圖紙名稱命名）
   exportAnnotatedImage() {
     if (!this.img) return;
     this.commitInline(false);
@@ -794,6 +827,8 @@ export class MeasureCanvas {
       if (this.tool === "STAMP") drawer.classList.remove("hidden");
       else drawer.classList.add("hidden");
     }
+    const stMenu = document.getElementById("mc-sticker-menu");
+    if (stMenu) stMenu.classList.add("hidden");
     this.updateObjectHUD();
     this.render();
   }
@@ -855,12 +890,30 @@ export class MeasureCanvas {
     document.getElementById("mc-merge-all").onclick = () => this.mergeAllIntoBase();
 
     const stInput = document.getElementById("mc-sticker-input");
-    stInput.onchange = (e) => { if (e.target.files?.[0]) this.addStickerFile(e.target.files[0]); stInput.value = ""; };
+    const stMenu = document.getElementById("mc-sticker-menu");
+    stInput.onchange = (e) => {
+      if (stMenu) stMenu.classList.add("hidden");
+      if (e.target.files?.[0]) this.addStickerFile(e.target.files[0]);
+      stInput.value = "";
+    };
+
+    document.getElementById("mc-paste-clipboard-btn").onclick = () => this.pasteFromClipboardButton();
+    document.getElementById("mc-pick-sticker-file-btn").onclick = () => {
+      if (stMenu) stMenu.classList.add("hidden");
+      stInput.click();
+    };
+    document.getElementById("mc-close-sticker-menu").onclick = () => {
+      if (stMenu) stMenu.classList.add("hidden");
+    };
 
     this.container.querySelectorAll(".mc-tool-btn").forEach(btn => {
       btn.onclick = () => {
         const next = btn.dataset.tool;
-        if (next === "STICKER") { stInput.click(); return; }
+        if (next === "STICKER") {
+          document.getElementById("mc-stamp-drawer")?.classList.add("hidden");
+          if (stMenu) stMenu.classList.toggle("hidden");
+          return;
+        }
         if (next === "STAMP" && this.tool === "STAMP") {
           document.getElementById("mc-stamp-drawer")?.classList.toggle("hidden");
           return;
