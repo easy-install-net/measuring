@@ -298,7 +298,7 @@ export class MeasureCanvas {
             </div>
           </div>
 
-          <div id="mc-keypad" class="hidden" style="position:absolute; top:10px; right:10px; width:225px; background:rgba(255,255,255,0.97); border:1.5px solid #111827; border-radius:8px; padding:8px; box-shadow:0 8px 20px rgba(0,0,0,0.35); z-index:20;">
+          <div id="mc-keypad" class="hidden" style="position:absolute; left:120px; top:120px; width:225px; background:rgba(255,255,255,0.97); border:1.5px solid #111827; border-radius:8px; padding:8px; box-shadow:0 8px 20px rgba(0,0,0,0.35); z-index:20;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
               <span id="mc-kp-title" style="font-size:11px; font-weight:700; color:#374151;">輸入尺寸 (mm)</span>
               <button type="button" id="mc-kp-close" style="border:none; background:none; font-size:15px; cursor:pointer; color:#6B7280;">✕</button>
@@ -331,23 +331,27 @@ export class MeasureCanvas {
     window.addEventListener("resize", () => this.render());
   }
 
-  positionMoveHUD(viewportX, viewportY) {
-    const hud = document.getElementById("mc-move-hud");
-    if (!hud || !this.viewport) return;
+  positionFloatingBox(el, viewportX, viewportY, fallbackW = 225, fallbackH = 220) {
+    if (!el || !this.viewport) return;
     const vw = this.viewport.clientWidth || 600;
     const vh = this.viewport.clientHeight || 430;
-    const hw = hud.offsetWidth || 225;
-    const hh = hud.offsetHeight || 130;
+    const bw = el.offsetWidth || fallbackW;
+    const bh = el.offsetHeight || fallbackH;
 
-    let left = viewportX + 20;
-    let top = viewportY - 20;
-    if (left + hw > vw - 10) left = Math.max(66, viewportX - hw - 18);
+    let left = viewportX + 16;
+    let top = viewportY + 16;
+    if (left + bw > vw - 10) left = Math.max(66, viewportX - bw - 16);
     if (left < 66) left = 66;
-    if (top + hh > vh - 10) top = Math.max(10, vh - hh - 10);
+    if (top + bh > vh - 10) top = Math.max(10, viewportY - bh - 16);
     if (top < 10) top = 10;
 
-    hud.style.left = `${left}px`;
-    hud.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }
+
+  positionMoveHUD(viewportX, viewportY) {
+    const hud = document.getElementById("mc-move-hud");
+    this.positionFloatingBox(hud, viewportX, viewportY, 225, 130);
   }
 
   updateFloatingMoveHUD(moveNearCursor = false) {
@@ -664,6 +668,7 @@ export class MeasureCanvas {
     }
 
     document.getElementById("mc-kp-display").textContent = this.keypadVal || "0";
+    this.positionFloatingBox(kp, this.lastCursorPos.x, this.lastCursorPos.y, 225, 240);
     this.updateFloatingMoveHUD(false);
     this.render();
   }
