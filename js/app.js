@@ -10,8 +10,8 @@ import { renderReportBuilder } from "./modules/report-builder.js";
 const root = document.getElementById("app-root");
 let masterDict = null;
 let currentProject = null;
-let activePageIdx = -1; // -1 = 總覽, >= 0 = 單頁度尺/審圖
-let viewMode = "FOLDER"; // "FOLDER" = 圖集資料夾卡片, "EXPANDED" = 空間展開全圖
+let activePageIdx = -1;
+let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
 let folderCoverIndex = {};
@@ -96,7 +96,6 @@ async function renderProjectList() {
   });
 }
 
-// 完全對齊舊系統 resolveMediaDoc 邏輯：優先讀 d.photo，否則按 index 拼接 chunks 裡的 c.data
 async function resolveLegacyMediaPhoto(projectDocId, mediaDocId, mediaMeta) {
   if (!mediaDocId) return "";
   if (mediaMeta && mediaMeta.photo) return mediaMeta.photo;
@@ -155,20 +154,38 @@ async function openLegacyImporter() {
       ]);
 
       const rawPagesMap = {};
+      // 1. 先從主文件內的 pages 陣列或物件讀取（兼容舊版儲存格式）
+      if (Array.isArray(target.pages)) {
+        target.pages.forEach((p, idx) => {
+          const pid = String(p.id || `pg_${idx}`);
+          rawPagesMap[pid] = { docId: pid, ...p };
+        });
+      } else if (target.pages && typeof target.pages === "object") {
+        Object.entries(target.pages).forEach(([k, p]) => {
+          const pid = String(p.id || k);
+          rawPagesMap[pid] = { docId: pid, ...p };
+        });
+      }
+
+      // 2. 再從 pages 子集合合併最新資料
       pagesSnap.forEach(d => {
         const data = d.data() || {};
-        rawPagesMap[d.id] = { docId: d.id, ...data };
+        rawPagesMap[d.id] = { ...(rawPagesMap[d.id] || {}), docId: d.id, ...data };
       });
 
       const mediaMetaMap = new Map();
-      mediaSnap.forEach(m => mediaMetaMap.set(String(m.id), m.data() || {}));
+      const mediaIdsList = [];
+      mediaSnap.forEach(m => {
+        const idStr = String(m.id);
+        mediaMetaMap.set(idStr, m.data() || {});
+        mediaIdsList.push(idStr);
+      });
 
       const deletedSet = new Set((target.deletedPageIds || []).map(String));
       const orderedIds = Array.isArray(target.pageIds) && target.pageIds.length > 0
         ? target.pageIds.map(String).filter(id => rawPagesMap[id] && !deletedSet.has(id))
         : Object.keys(rawPagesMap).filter(id => !deletedSet.has(id));
 
-      // 加上不在 pageIds 裡但未刪除的頁
       Object.keys(rawPagesMap).forEach(id => {
         if (!deletedSet.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
       });
@@ -188,14 +205,13 @@ async function openLegacyImporter() {
         const pg = rawPagesMap[orderedIds[i]];
         const pageIdStr = String(pg.id || pg.docId);
 
-        // 完全對齊舊系統空間欄位：pg.space 或 pg.spaces[0]
         const rawSpace = (Array.isArray(pg.spaces) && pg.spaces[0]) ? pg.spaces[0] : (pg.space || "");
         const spaceName = String(rawSpace).trim() || "未標空間";
 
         const rawDocType = pg.docType || "photo";
         const typeLabel = DOC_TYPE_LABELS[rawDocType] || rawDocType;
 
-        // 完全對齊舊系統圖片索引：pg.photoId 優先，否則 'page_' + pg.id
+        // 多重對應圖片：pg.photoId -> 'page_' + id -> 依順序對應 mediaIdsList -> pg.photo
         let imgUrl = "";
         if (pg.photoId && mediaMetaMap.has(String(pg.photoId))) {
           imgUrl = await getCachedPhoto(String(pg.photoId));
@@ -205,6 +221,9 @@ async function openLegacyImporter() {
         }
         if (!imgUrl && pg.photo) {
           imgUrl = pg.photo;
+        }
+        if (!imgUrl && mediaIdsList[i]) {
+          imgUrl = await getCachedPhoto(mediaIdsList[i]);
         }
 
         const oldLines = Array.isArray(pg.lines) ? pg.lines : [];
@@ -310,7 +329,6 @@ function renderOverview() {
     ]);
 
   root.innerHTML = `
-    <!-- 頂部導航列 -->
     <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
       <div style="display:flex; align-items:center; gap:8px;">
         <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
@@ -322,7 +340,6 @@ function renderOverview() {
       </div>
     </div>
 
-    <!-- 雙層篩選 + 圖集/展開模式切換列 -->
     <div class="card" style="padding:10px; margin-bottom:10px;">
       <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #E5E7EB;">
         <span style="font-size:12px; color:#6B7280; margin-right:2px;">${filteredPages.length}/${pages.length}頁</span>
@@ -342,7 +359,6 @@ function renderOverview() {
       </div>
     </div>
 
-    <!-- 新增空間/圖紙展開盒 -->
     <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}">
       <div class="section-title">第一步：選擇空間</div>
       <div class="chip-grid" id="picker-spaces" style="margin-bottom:10px;"></div>
@@ -362,7 +378,6 @@ function renderOverview() {
       </div>
     </div>
 
-    <!-- 主內容區：圖集資料夾網格 vs 展開空間分區網格 -->
     <div id="main-gallery-host"></div>
   `;
 
@@ -394,7 +409,6 @@ function renderOverview() {
   }
 }
 
-// 圖集資料夾卡片模式（完全還原截圖：空間名 + 張數 / 主封面預覽 / 底部4張迷你縮圖 + +N + 展開>）
 function renderFolderGrid(host, sortedGroups, allPages) {
   host.innerHTML = `
     <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px;">
@@ -471,7 +485,6 @@ function renderFolderGrid(host, sortedGroups, allPages) {
   });
 }
 
-// 展開模式：獨立空間分區框 + 三欄縮圖卡片
 function renderExpandedSections(host, sortedGroups, allPages) {
   host.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:14px;">
