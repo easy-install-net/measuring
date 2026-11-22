@@ -1,95 +1,43 @@
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
 import { db, COLLECTIONS } from "./config/firebase-init.js";
-
 import { loadMasterDict } from "./config/master-dict.js";
-
 import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
-
 import { uploadMediaToCloud } from "./core/image-upload.js";
-
 import { MeasureCanvas } from "./modules/measure-canvas.js";
-
 import { renderReportBuilder } from "./modules/report-builder.js";
-
-
-
 const PROJ_COL = (COLLECTIONS && COLLECTIONS.PROJECTS) || "measuring_projects";
-
 const MEDIA_COL = (COLLECTIONS && COLLECTIONS.MEDIA) || "measuring_media";
-
-
-
 const root = document.getElementById("app-root");
-
 let masterDict = null;
-
 let currentProject = null;
-
 let activePageIdx = -1;
-
 let viewMode = "FOLDER";
-
 let filterSpace = "ALL";
-
 let filterDocType = "ALL";
-
 let folderCoverIndex = {};
-
 const memoryPhotoCache = new Map();
-
-
-
 const DOC_TYPE_LABELS = {
-
 plan: "平面圖",
-
 photo: "拍攝",
-
 "3d": "立體圖",
-
 detail: "詳圖",
-
 render: "效果圖",
-
 dim: "尺吋圖"
-
 };
-
-
-
 const DOC_TYPE_RANK = { plan: 1, photo: 2, "3d": 3, dim: 4, detail: 5, render: 6 };
-
-
-
 const ZONE_THEMES = [
-
 { bg: "#FFFBEB", border: "#F59E0B", headerBg: "#FEF3C7", text: "#78350F", badgeBg: "#FDE68A" },
-
 { bg: "#F0F9FF", border: "#0284C7", headerBg: "#E0F2FE", text: "#0C4A6E", badgeBg: "#BAE6FD" },
-
 { bg: "#ECFDF5", border: "#059669", headerBg: "#D1FAE5", text: "#064E3B", badgeBg: "#A7F3D0" },
-
 { bg: "#FFF1F2", border: "#E11D48", headerBg: "#FFE4E6", text: "#881337", badgeBg: "#FECDD3" },
-
 { bg: "#EEF2FF", border: "#4F46E5", headerBg: "#E0E7FF", text: "#312E81", badgeBg: "#C7D2FE" }
-
 ];
-
 const MASTER_ZONE_THEME = { bg: "#FAF5FF", border: "#9333EA", headerBg: "#F3E8FF", text: "#581C87", badgeBg: "#E9D5FF" };
-
 const UNASSIGNED_ZONE_THEME = { bg: "#F8FAFC", border: "#64748B", headerBg: "#E2E8F0", text: "#1E293B", badgeBg: "#CBD5E1" };
 
-
-
 checkBrowserCompatibility();
-
-
-
 watchAuth(async () => {
-
 masterDict = await loadMasterDict();
-
 renderProjectList();
 
 }, () => {
