@@ -18,7 +18,6 @@ export class MeasureCanvas {
     this.container = container;
     this.imageUrl = imageUrl;
 
-    // 保留原始物件結構（防覆蓋安全鎖：儲存時保留所有原有未知欄位）
     this.rawInitialData = (initialData && !Array.isArray(initialData) && typeof initialData === "object")
       ? JSON.parse(JSON.stringify(initialData))
       : {};
@@ -57,26 +56,50 @@ export class MeasureCanvas {
     this.history = [];
     this.redoStack = [];
     this.selectedObj = null;
-    this.activeSegIdx = -1;
-    this.keypadVal = "";
+    this.inlineEditState = null;
     this.stickerCache = new Map();
     this.lastCursorPos = { x: 140, y: 120 };
 
-    this.img = new Image();
-    this.img.crossOrigin = "anonymous";
-    this.img.onload = () => {
-      this.natW = this.img.naturalWidth || 1200;
-      this.natH = this.img.naturalHeight || 900;
-      this.normalizeLegacyCoordinates();
-      this.preloadStickers();
-      this.initUI();
-      this.fitToScreen();
-      this.render();
-    };
-    this.img.src = imageUrl;
+    this.loadBaseImage(imageUrl, true);
   }
 
-  // 自動掃描舊資料庫中任何存放貼圖／小圖的陣列欄位
+  loadBaseImage(src, isInitial = false) {
+    const im = new Image();
+    im.crossOrigin = "anonymous";
+    im.onload = () => {
+      this.img = im;
+      this.natW = im.naturalWidth || 1200;
+      this.natH = im.naturalHeight || 900;
+      if (isInitial) {
+        this.normalizeLegacyCoordinates();
+        this.preloadStickers();
+        this.initUI();
+        this.fitToScreen();
+      }
+      this.render();
+    };
+    im.onerror = () => {
+      // 若伺服器未開放 CORS 標頭，自動回退為一般載入模式確保圖片正常顯示
+      if (im.crossOrigin) {
+        const fallback = new Image();
+        fallback.onload = () => {
+          this.img = fallback;
+          this.natW = fallback.naturalWidth || 1200;
+          this.natH = fallback.naturalHeight || 900;
+          if (isInitial) {
+            this.normalizeLegacyCoordinates();
+            this.preloadStickers();
+            this.initUI();
+            this.fitToScreen();
+          }
+          this.render();
+        };
+        fallback.src = src;
+      }
+    };
+    im.src = src;
+  }
+
   extractLegacyStickers(data) {
     if (!data || typeof data !== "object") return [];
     const knownKeys = ["stickers", "images", "overlays", "attachments", "subImages", "pips", "refs", "photos", "clips"];
@@ -182,19 +205,22 @@ export class MeasureCanvas {
 
   pushHistory() {
     this.history.push(JSON.stringify({
+      imageUrl: this.imageUrl,
       lines: this.lines,
       markers: this.markers,
       paths: this.paths,
       walls: this.walls,
       stickers: this.stickers
     }));
-    if (this.history.length > 50) this.history.shift();
+    if (this.history.length > 40) this.history.shift();
     this.redoStack = [];
   }
 
   undo() {
     if (!this.history.length) return;
+    this.commitInlineEditor(false);
     this.redoStack.push(JSON.stringify({
+      imageUrl: this.imageUrl,
       lines: this.lines,
       markers: this.markers,
       paths: this.paths,
@@ -209,15 +235,21 @@ export class MeasureCanvas {
     this.stickers = prev.stickers || [];
     this.preloadStickers();
     this.selectedObj = null;
-    this.closeKeypad();
     this.updateFloatingMoveHUD(false);
-    this.render();
+    if (prev.imageUrl && prev.imageUrl !== this.imageUrl) {
+      this.imageUrl = prev.imageUrl;
+      this.loadBaseImage(prev.imageUrl, false);
+    } else {
+      this.render();
+    }
     this.triggerSave();
   }
 
   redo() {
     if (!this.redoStack.length) return;
+    this.commitInlineEditor(false);
     this.history.push(JSON.stringify({
+      imageUrl: this.imageUrl,
       lines: this.lines,
       markers: this.markers,
       paths: this.paths,
@@ -231,7 +263,12 @@ export class MeasureCanvas {
     this.walls = next.walls || [];
     this.stickers = next.stickers || [];
     this.preloadStickers();
-    this.render();
+    if (next.imageUrl && next.imageUrl !== this.imageUrl) {
+      this.imageUrl = next.imageUrl;
+      this.loadBaseImage(next.imageUrl, false);
+    } else {
+      this.render();
+    }
     this.triggerSave();
   }
 
@@ -245,6 +282,11 @@ export class MeasureCanvas {
         walls: this.walls,
         stickers: this.stickers
       };
+      if (this.imageUrl) {
+        if ("imageUrl" in this.rawInitialData) payload.imageUrl = this.imageUrl;
+        if ("url" in this.rawInitialData) payload.url = this.imageUrl;
+        if ("imgUrl" in this.rawInitialData) payload.imgUrl = this.imageUrl;
+      }
       if (this._legacyStickerKey && this._legacyStickerKey !== "stickers") {
         payload[this._legacyStickerKey] = this.stickers;
       }
@@ -255,7 +297,8 @@ export class MeasureCanvas {
   initUI() {
     this.container.innerHTML = `
       <div class="mc-wrapper" style="background:#111827; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; user-select:none;">
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:#1F2937; border-bottom:1px solid #374151; flex-wrap:wrap; gap:8px;">
+        <!-- 頂部工具列：全部集中正中對齊 -->
+        <div style="display:flex; justify-content:center; align-items:center; padding:6px 12px; background:#1F2937; border-bottom:1px solid #374151; flex-wrap:wrap; gap:14px;">
           <div style="display:flex; align-items:center; gap:6px;">
             ${this.colors.map(c => `
               <button type="button" class="mc-color-btn" data-color="${c}"
@@ -263,16 +306,22 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <div style="display:flex; align-items:center; gap:5px;">
-            <button type="button" id="mc-fit" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563;">重置視角</button>
-            <button type="button" id="mc-undo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563;" title="Ctrl+Z">↩ 復原</button>
-            <button type="button" id="mc-redo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563;" title="Ctrl+Y">↪ 重做</button>
+          <div style="width:1px; height:16px; background:#4B5563;"></div>
+
+          <div style="display:flex; align-items:center; gap:6px;">
+            <button type="button" id="mc-fit" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;">重置視角</button>
+            <button type="button" id="mc-undo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;" title="Ctrl+Z">↩ 復原</button>
+            <button type="button" id="mc-redo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;" title="Ctrl+Y">↪ 重做</button>
           </div>
         </div>
 
         <div id="mc-viewport" style="position:relative; width:100%; height:74vh; min-height:440px; background:#0F172A; overflow:hidden; touch-action:none;">
           <canvas id="mc-canvas" style="display:block; width:100%; height:100%;"></canvas>
           <input type="file" id="mc-sticker-input" accept="image/*" class="hidden">
+
+          <!-- 就地直接打字輸入框（零跳窗，直接出現在圖紙位置上） -->
+          <input type="text" id="mc-inline-input" class="hidden" autocomplete="off" spellcheck="false"
+                 style="position:absolute; transform:translate(-50%, -50%); background:rgba(255,255,255,0.96); border:1.5px dashed #2563EB; border-radius:4px; padding:1px 6px; text-align:center; font-weight:700; outline:none; z-index:25; min-width:54px; box-shadow:0 2px 8px rgba(0,0,0,0.22);" />
 
           <!-- 左側打直懸浮工具條 -->
           <div id="mc-left-bar" style="position:absolute; left:10px; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:5px; background:rgba(17,24,39,0.88); backdrop-filter:blur(6px); padding:6px 5px; border-radius:12px; border:1px solid rgba(255,255,255,0.16); box-shadow:0 8px 24px rgba(0,0,0,0.45); z-index:15;">
@@ -294,7 +343,7 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 精緻懸浮印章卡片（不再佔用頂部高度） -->
+          <!-- 精緻懸浮印章卡片 -->
           <div id="mc-stamp-drawer" class="hidden" style="position:absolute; left:66px; top:50%; transform:translateY(-50%); width:260px; max-height:70vh; overflow-y:auto; background:rgba(255,255,255,0.96); backdrop-filter:blur(8px); padding:10px; border-radius:12px; border:1.5px solid #CBD5E1; box-shadow:0 12px 30px rgba(0,0,0,0.4); z-index:19; display:flex; flex-direction:column; gap:8px;">
             <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:4px;">
               <span style="font-size:12px; font-weight:800; color:#1E293B;">🔖 選擇印章（點圖紙蓋章）</span>
@@ -312,12 +361,16 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 隨身浮動控制條（與數字鍵盤自動錯開不重疊） -->
-          <div id="mc-move-hud" class="hidden" style="position:absolute; left:72px; top:14px; background:rgba(17,24,39,0.95); backdrop-filter:blur(8px); border:1px solid rgba(96,165,250,0.7); border-radius:10px; padding:8px 10px; box-shadow:0 10px 26px rgba(0,0,0,0.5); z-index:18; display:flex; flex-direction:column; gap:7px; width:225px;">
+          <!-- 隨身浮動控制條（含一鍵確定合併貼圖防丟失） -->
+          <div id="mc-move-hud" class="hidden" style="position:absolute; left:72px; top:14px; background:rgba(17,24,39,0.95); backdrop-filter:blur(8px); border:1px solid rgba(96,165,250,0.7); border-radius:10px; padding:8px 10px; box-shadow:0 10px 26px rgba(0,0,0,0.5); z-index:18; display:flex; flex-direction:column; gap:7px; width:230px;">
             <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #374151; padding-bottom:4px;">
               <span id="mc-hud-target" style="font-size:11px; font-weight:700; color:#93C5FD;">✋ 移動調整（全域比例）</span>
               <button type="button" id="mc-hud-del" class="hidden" style="background:#DC2626; color:#FFF; border:none; border-radius:4px; padding:2px 6px; font-size:10px; font-weight:700; cursor:pointer;">🗑️ 刪除</button>
             </div>
+
+            <button type="button" id="mc-hud-merge-sticker" class="hidden" style="background:#059669; color:#FFF; border:none; border-radius:6px; padding:6px 8px; font-size:12px; font-weight:700; cursor:pointer; text-align:center; box-shadow:0 2px 6px rgba(5,150,105,0.4);">
+              📌 確定合併進底圖（防丟失）
+            </button>
 
             <div style="display:flex; align-items:center; gap:6px;">
               <span style="font-size:11px; color:#D1D5DB; min-width:28px;">顏色</span>
@@ -345,27 +398,6 @@ export class MeasureCanvas {
               <span id="mc-line-val" style="font-size:10px; color:#6EE7B7; min-width:30px; text-align:right;">${Math.round(this.lineFactor * 100)}%</span>
             </div>
           </div>
-
-          <!-- 浮動數字鍵盤 -->
-          <div id="mc-keypad" class="hidden" style="position:absolute; left:120px; top:120px; width:225px; background:rgba(255,255,255,0.97); border:1.5px solid #111827; border-radius:8px; padding:8px; box-shadow:0 8px 20px rgba(0,0,0,0.35); z-index:20;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-              <span id="mc-kp-title" style="font-size:11px; font-weight:700; color:#374151;">輸入尺寸 (mm)</span>
-              <button type="button" id="mc-kp-close" style="border:none; background:none; font-size:15px; cursor:pointer; color:#6B7280;">✕</button>
-            </div>
-            <div id="mc-kp-segs" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px;"></div>
-            <div id="mc-kp-display" style="background:#F3F4F6; border:1px solid #9CA3AF; border-radius:4px; padding:5px 8px; font-size:17px; font-weight:800; text-align:right; color:#111827; margin-bottom:6px; min-height:32px;">0</div>
-            <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:4px; margin-bottom:5px;">
-              ${["7","8","9","4","5","6","1","2","3","0","00","⌫"].map(k => `
-                <button type="button" class="mc-kp-key" data-key="${k}" style="padding:6px 0; font-size:14px; font-weight:700; background:#FFF; border:1px solid #CBD5E1; border-radius:4px; cursor:pointer;">${k}</button>
-              `).join("")}
-            </div>
-            <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:4px;">
-              <button type="button" class="mc-kp-adj" data-adj="-5" style="padding:5px 0; font-size:11px; font-weight:700; background:#FEF3C7; border:1px solid #F59E0B; border-radius:4px; cursor:pointer;">-5</button>
-              <button type="button" class="mc-kp-adj" data-adj="-7" style="padding:5px 0; font-size:11px; font-weight:700; background:#FEF3C7; border:1px solid #F59E0B; border-radius:4px; cursor:pointer;">-7</button>
-              <button type="button" class="mc-kp-adj" data-adj="-10" style="padding:5px 0; font-size:11px; font-weight:700; background:#FEF3C7; border:1px solid #F59E0B; border-radius:4px; cursor:pointer;">-10</button>
-              <button type="button" id="mc-kp-ok" style="padding:5px 0; font-size:11px; font-weight:700; background:#111827; color:#FFF; border:none; border-radius:4px; cursor:pointer;">確定</button>
-            </div>
-          </div>
         </div>
       </div>
     `;
@@ -373,56 +405,225 @@ export class MeasureCanvas {
     this.viewport = document.getElementById("mc-viewport");
     this.canvas = document.getElementById("mc-canvas");
     this.ctx = this.canvas.getContext("2d");
+    this.inlineInput = document.getElementById("mc-inline-input");
 
     this.bindToolbarEvents();
+    this.bindInlineInputEvents();
     this.bindKeyboardAndPaste();
     this.bindPointerEvents();
-    window.addEventListener("resize", () => this.render());
+    window.addEventListener("resize", () => {
+      this.render();
+      this.repositionInlineInput();
+    });
   }
 
-  // 智能並排錯開定位：確保隨身調整條與數字鍵盤絕對不重疊
-  syncFloatingPanels(viewportX, viewportY) {
-    if (!this.viewport) return;
+  // 啟動就地直接打字（支持拉尺數字與文字備註）
+  startInlineEdit(state) {
+    this.commitInlineEditor(false);
+    this.inlineEditState = state;
+    const inp = this.inlineInput;
+    if (!inp) return;
+
+    inp.value = state.initialValue || "";
+    inp.placeholder = state.kind === "line" ? "輸入數字(如 1755-5)" : "輸入文字...";
+    inp.inputMode = state.kind === "line" ? "decimal" : "text";
+    inp.style.color = state.color || this.activeColor;
+    inp.classList.remove("hidden");
+
+    this.repositionInlineInput();
+    this.render();
+    requestAnimationFrame(() => {
+      inp.focus();
+      inp.select();
+    });
+  }
+
+  repositionInlineInput() {
+    if (!this.inlineEditState || !this.inlineInput || this.inlineInput.classList.contains("hidden")) return;
+    const st = this.inlineEditState;
+    let imgX = st.x;
+    let imgY = st.y;
+    let fScale = this.fontFactor;
+
+    if (st.kind === "line") {
+      const l = this.lines[st.lineIdx];
+      if (!l) return;
+      fScale = l.fontScale || this.fontFactor;
+      const splits = Array.isArray(l.splits) ? l.splits : [];
+      if (splits.length > 0 && st.segIdx >= 0) {
+        const ptsT = [0, ...splits, 1];
+        const midT = (ptsT[st.segIdx] + ptsT[st.segIdx + 1]) / 2;
+        imgX = l.x1 + (l.x2 - l.x1) * midT;
+        imgY = l.y1 + (l.y2 - l.y1) * midT;
+      } else {
+        imgX = (l.x1 + l.x2) / 2;
+        imgY = (l.y1 + l.y2) / 2;
+      }
+    } else if (st.kind === "marker" && typeof st.markerIdx === "number") {
+      const m = this.markers[st.markerIdx];
+      if (m) {
+        imgX = m.x;
+        imgY = m.y;
+        fScale = m.fontScale || this.fontFactor;
+      }
+    }
+
+    const screenX = imgX * this.scale + this.offsetX;
+    const screenY = imgY * this.scale + this.offsetY;
+    const fontSize = Math.max(13, Math.round((this.natW / 74) * fScale * this.scale));
+
+    this.inlineInput.style.left = `${screenX}px`;
+    this.inlineInput.style.top = `${screenY}px`;
+    this.inlineInput.style.fontSize = `${fontSize}px`;
+    this.inlineInput.style.width = `${Math.max(64, (this.inlineInput.value.length + 2) * fontSize * 0.72)}px`;
+  }
+
+  // 安全計算數字或簡易扣減算式（例如 "1755-5" -> 1750）
+  evaluateDimensionExpr(raw) {
+    const cleaned = String(raw || "").trim().replace(/[^\d.+-]/g, "");
+    if (!cleaned) return "";
+    if (/^[\d.+-]+$/.test(cleaned)) {
+      const tokens = cleaned.match(/[+-]?[\d.]+/g);
+      if (tokens) {
+        const sum = tokens.reduce((acc, tok) => acc + (parseFloat(tok) || 0), 0);
+        return String(Math.round(sum * 100) / 100);
+      }
+    }
+    return cleaned;
+  }
+
+  commitInlineEditor(shouldRender = true) {
+    if (!this.inlineEditState || !this.inlineInput) return;
+    const st = this.inlineEditState;
+    const val = this.inlineInput.value.trim();
+
+    this.inlineEditState = null;
+    this.inlineInput.classList.add("hidden");
+
+    if (st.kind === "line") {
+      const l = this.lines[st.lineIdx];
+      if (l) {
+        const computed = this.evaluateDimensionExpr(val);
+        this.pushHistory();
+        if (Array.isArray(l.splits) && l.splits.length > 0 && st.segIdx >= 0) {
+          if (!Array.isArray(l.segValues)) l.segValues = Array(l.splits.length + 1).fill("");
+          l.segValues[st.segIdx] = computed;
+          const total = l.segValues.reduce((s, v) => s + (Number(v) || 0), 0);
+          l.text = total > 0 ? String(total) : "";
+        } else {
+          l.text = computed;
+        }
+        this.triggerSave();
+      }
+    } else if (st.kind === "marker") {
+      if (typeof st.markerIdx === "number" && this.markers[st.markerIdx]) {
+        if (val) {
+          this.pushHistory();
+          this.markers[st.markerIdx].text = val;
+          this.triggerSave();
+        }
+      } else if (val) {
+        this.pushHistory();
+        this.markers.push({
+          x: st.x,
+          y: st.y,
+          text: val,
+          color: st.color || this.activeColor,
+          isStamp: false
+        });
+        this.triggerSave();
+      }
+    }
+
+    if (shouldRender) this.render();
+  }
+
+  cancelInlineEditor() {
+    this.inlineEditState = null;
+    if (this.inlineInput) this.inlineInput.classList.add("hidden");
+    this.render();
+  }
+
+  bindInlineInputEvents() {
+    if (!this.inlineInput) return;
+    this.inlineInput.addEventListener("input", () => {
+      const fs = parseFloat(this.inlineInput.style.fontSize) || 15;
+      this.inlineInput.style.width = `${Math.max(64, (this.inlineInput.value.length + 2) * fs * 0.72)}px`;
+    });
+    this.inlineInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.commitInlineEditor(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelInlineEditor();
+      }
+    });
+    this.inlineInput.addEventListener("blur", () => {
+      if (this.inlineEditState) this.commitInlineEditor(true);
+    });
+  }
+
+  // 一鍵將選中的貼圖燒錄合併進底圖，徹底防丟失
+  mergeSelectedStickerIntoBase() {
+    if (!this.selectedObj || this.selectedObj.type !== "sticker") return;
+    const idx = this.selectedObj.idx;
+    const st = this.stickers[idx];
+    if (!st || !this.img) return;
+
+    const src = st.url || st.src || st.imageUrl || st.dataUrl || st.img || st.fileUrl;
+    const stImg = src ? this.stickerCache.get(src) : null;
+    if (!stImg || !stImg.complete) {
+      alert("貼圖仍在載入中，請稍候一秒再按合併。");
+      return;
+    }
+
+    try {
+      const off = document.createElement("canvas");
+      off.width = this.natW;
+      off.height = this.natH;
+      const octx = off.getContext("2d");
+      octx.drawImage(this.img, 0, 0, this.natW, this.natH);
+      octx.drawImage(stImg, st.x, st.y, st.w, st.h);
+
+      let mergedDataUrl = "";
+      try {
+        mergedDataUrl = off.toDataURL("image/jpeg", 0.92);
+      } catch (corsErr) {
+        alert("無法直接合併雲端原底圖（伺服器跨網域 CORS 限制）。建議先下載或截圖後作為新底圖上傳。");
+        return;
+      }
+
+      this.pushHistory();
+      this.stickers.splice(idx, 1);
+      this.selectedObj = null;
+      this.imageUrl = mergedDataUrl;
+      this.updateFloatingMoveHUD(false);
+      this.loadBaseImage(mergedDataUrl, false);
+      this.triggerSave();
+    } catch (err) {
+      console.error("合併貼圖失敗:", err);
+    }
+  }
+
+  positionMoveHUD(viewportX, viewportY) {
+    const hud = document.getElementById("mc-move-hud");
+    if (!hud || !this.viewport) return;
     const vw = this.viewport.clientWidth || 600;
     const vh = this.viewport.clientHeight || 440;
-    const kp = document.getElementById("mc-keypad");
-    const hud = document.getElementById("mc-move-hud");
+    const bw = 230;
+    const bh = hud.offsetHeight || 150;
 
-    const kpVisible = kp && !kp.classList.contains("hidden");
-    const hudVisible = hud && !hud.classList.contains("hidden");
+    let left = viewportX + 16;
+    let top = viewportY + 16;
+    if (left + bw > vw - 10) left = Math.max(66, viewportX - bw - 16);
+    if (left < 66) left = 66;
+    if (top + bh > vh - 10) top = Math.max(10, viewportY - bh - 16);
+    if (top < 10) top = 10;
 
-    const kpW = 225, kpH = kp?.offsetHeight || 245;
-    const hudW = 225, hudH = hud?.offsetHeight || 132;
-    const gap = 8;
-
-    let baseLeft = viewportX + 16;
-    if (baseLeft + kpW > vw - 10) baseLeft = Math.max(66, viewportX - kpW - 16);
-    if (baseLeft < 66) baseLeft = 66;
-
-    if (kpVisible && hudVisible) {
-      // 兩者同時顯示時，上下緊密並排（隨身調整條在上方、數字鍵盤在下方，中間留 8px 間距）
-      const totalH = hudH + gap + kpH;
-      let topY = viewportY - Math.round(totalH * 0.35);
-      if (topY + totalH > vh - 10) topY = Math.max(10, vh - totalH - 10);
-      if (topY < 10) topY = 10;
-
-      hud.style.left = `${baseLeft}px`;
-      hud.style.top = `${topY}px`;
-      kp.style.left = `${baseLeft}px`;
-      kp.style.top = `${topY + hudH + gap}px`;
-    } else if (kpVisible) {
-      let topY = viewportY + 16;
-      if (topY + kpH > vh - 10) topY = Math.max(10, viewportY - kpH - 16);
-      if (topY < 10) topY = 10;
-      kp.style.left = `${baseLeft}px`;
-      kp.style.top = `${topY}px`;
-    } else if (hudVisible) {
-      let topY = viewportY + 16;
-      if (topY + hudH > vh - 10) topY = Math.max(10, viewportY - hudH - 16);
-      if (topY < 10) topY = 10;
-      hud.style.left = `${baseLeft}px`;
-      hud.style.top = `${topY}px`;
-    }
+    hud.style.left = `${left}px`;
+    hud.style.top = `${top}px`;
   }
 
   updateFloatingMoveHUD(moveNearCursor = false) {
@@ -437,6 +638,7 @@ export class MeasureCanvas {
     hud.classList.remove("hidden");
     const targetLabel = document.getElementById("mc-hud-target");
     const delBtn = document.getElementById("mc-hud-del");
+    const mergeBtn = document.getElementById("mc-hud-merge-sticker");
     const fontSlider = document.getElementById("mc-font-slider");
     const lineSlider = document.getElementById("mc-line-slider");
     const fontVal = document.getElementById("mc-font-val");
@@ -444,6 +646,7 @@ export class MeasureCanvas {
 
     let curFont = this.fontFactor;
     let curLine = this.lineFactor;
+    mergeBtn.classList.add("hidden");
 
     if (this.selectedObj) {
       delBtn.classList.remove("hidden");
@@ -460,6 +663,7 @@ export class MeasureCanvas {
         curLine = this.paths[idx].lineScale || this.lineFactor;
       } else if (type === "sticker") {
         targetLabel.textContent = "🖼️ 已選中貼圖（拖右下角縮放）";
+        mergeBtn.classList.remove("hidden");
       }
     } else {
       delBtn.classList.add("hidden");
@@ -472,7 +676,7 @@ export class MeasureCanvas {
     lineVal.textContent = `${Math.round(curLine * 100)}%`;
 
     if (moveNearCursor) {
-      this.syncFloatingPanels(this.lastCursorPos.x, this.lastCursorPos.y);
+      this.positionMoveHUD(this.lastCursorPos.x, this.lastCursorPos.y);
     }
   }
 
@@ -548,12 +752,12 @@ export class MeasureCanvas {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         this.redo();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && this.selectedObj && document.getElementById("mc-keypad")?.classList.contains("hidden")) {
+      } else if ((e.key === "Delete" || e.key === "Backspace") && this.selectedObj) {
         e.preventDefault();
         this.deleteSelected();
       } else if (e.key === "Escape") {
         this.selectedObj = null;
-        this.closeKeypad();
+        this.cancelInlineEditor();
         document.getElementById("mc-stamp-drawer")?.classList.add("hidden");
         this.updateFloatingMoveHUD(false);
         this.render();
@@ -584,7 +788,6 @@ export class MeasureCanvas {
     else if (type === "path") this.paths.splice(idx, 1);
     else if (type === "sticker") this.stickers.splice(idx, 1);
     this.selectedObj = null;
-    this.closeKeypad();
     this.updateFloatingMoveHUD(false);
     this.render();
     this.triggerSave();
@@ -622,6 +825,7 @@ export class MeasureCanvas {
   }
 
   setActiveTool(toolId, moveHudNearCursor = false) {
+    this.commitInlineEditor(false);
     this.tool = toolId;
     this.container.querySelectorAll(".mc-tool-btn").forEach(b => {
       const active = b.dataset.tool === this.tool;
@@ -654,6 +858,7 @@ export class MeasureCanvas {
     document.getElementById("mc-line-inc").onclick = () => this.applyLineFactorChange(Number(lineSlider.value) + 0.1, true);
 
     document.getElementById("mc-hud-del").onclick = () => this.deleteSelected();
+    document.getElementById("mc-hud-merge-sticker").onclick = () => this.mergeSelectedStickerIntoBase();
 
     const stickerInput = document.getElementById("mc-sticker-input");
     stickerInput.onchange = (e) => {
@@ -693,94 +898,35 @@ export class MeasureCanvas {
       };
     });
 
-    document.getElementById("mc-fit").onclick = () => { this.fitToScreen(); this.render(); };
+    document.getElementById("mc-fit").onclick = () => { this.fitToScreen(); this.render(); this.repositionInlineInput(); };
     document.getElementById("mc-undo").onclick = () => this.undo();
     document.getElementById("mc-redo").onclick = () => this.redo();
-    document.getElementById("mc-kp-close").onclick = () => this.closeKeypad();
-
-    this.container.querySelectorAll(".mc-kp-key").forEach(btn => {
-      btn.onclick = () => {
-        const k = btn.dataset.key;
-        if (k === "⌫") this.keypadVal = this.keypadVal.slice(0, -1);
-        else this.keypadVal += k;
-        document.getElementById("mc-kp-display").textContent = this.keypadVal || "0";
-      };
-    });
-
-    this.container.querySelectorAll(".mc-kp-adj").forEach(btn => {
-      btn.onclick = () => {
-        const cur = Number(this.keypadVal || 0);
-        const next = Math.max(0, cur + Number(btn.dataset.adj));
-        this.keypadVal = String(next);
-        document.getElementById("mc-kp-display").textContent = this.keypadVal;
-      };
-    });
-
-    document.getElementById("mc-kp-ok").onclick = () => this.commitKeypadValue();
   }
 
-  openKeypad(lineIdx, segIdx = -1) {
-    this.selectedObj = { type: "line", idx: lineIdx, part: "body" };
-    this.activeSegIdx = segIdx;
+  openInlineLineEditor(lineIdx, segIdx = 0) {
     const line = this.lines[lineIdx];
     if (!line) return;
-
-    const kp = document.getElementById("mc-keypad");
-    const segsBox = document.getElementById("mc-kp-segs");
-    kp.classList.remove("hidden");
+    this.selectedObj = { type: "line", idx: lineIdx, part: "body" };
+    this.updateFloatingMoveHUD(false);
 
     const hasSplits = Array.isArray(line.splits) && line.splits.length > 0;
+    let initVal = "";
     if (hasSplits) {
       const segCount = line.splits.length + 1;
       if (!Array.isArray(line.segValues)) line.segValues = Array(segCount).fill("");
       while (line.segValues.length < segCount) line.segValues.push("");
-      if (segIdx < 0 || segIdx >= segCount) this.activeSegIdx = 0;
-
-      document.getElementById("mc-kp-title").textContent = `修改第 ${this.activeSegIdx + 1} 段 (共${segCount}段)`;
-      segsBox.innerHTML = line.segValues.slice(0, segCount).map((val, idx) => `
-        <button type="button" class="chip ${idx === this.activeSegIdx ? "active" : ""}" data-seg="${idx}">
-          段${idx + 1}: ${val || 0}
-        </button>
-      `).join("");
-      segsBox.querySelectorAll("[data-seg]").forEach(b => {
-        b.onclick = () => this.openKeypad(lineIdx, Number(b.dataset.seg));
-      });
-      this.keypadVal = String(line.segValues[this.activeSegIdx] || "");
+      initVal = String(line.segValues[segIdx] || "");
     } else {
-      document.getElementById("mc-kp-title").textContent = "輸入尺寸 (mm)（點線上可分段）";
-      segsBox.innerHTML = "";
-      this.keypadVal = String(line.text || line.label || "").replace(/[^\d.]/g, "");
+      initVal = String(line.text || line.label || "").replace(/[^\d.]/g, "");
     }
 
-    document.getElementById("mc-kp-display").textContent = this.keypadVal || "0";
-    this.updateFloatingMoveHUD(false);
-    this.syncFloatingPanels(this.lastCursorPos.x, this.lastCursorPos.y);
-    this.render();
-  }
-
-  commitKeypadValue() {
-    if (!this.selectedObj || this.selectedObj.type !== "line") return;
-    const line = this.lines[this.selectedObj.idx];
-    if (!line) return;
-
-    this.pushHistory();
-    const num = Number(this.keypadVal || 0);
-    if (Array.isArray(line.splits) && line.splits.length > 0 && this.activeSegIdx >= 0) {
-      line.segValues[this.activeSegIdx] = this.keypadVal ? String(num) : "";
-      const total = line.segValues.reduce((sum, v) => sum + (Number(v) || 0), 0);
-      line.text = total > 0 ? String(total) : "";
-    } else {
-      line.text = this.keypadVal ? String(num) : "";
-    }
-    this.closeKeypad();
-    this.render();
-    this.triggerSave();
-  }
-
-  closeKeypad() {
-    const kp = document.getElementById("mc-keypad");
-    if (kp) kp.classList.add("hidden");
-    this.syncFloatingPanels(this.lastCursorPos.x, this.lastCursorPos.y);
+    this.startInlineEdit({
+      kind: "line",
+      lineIdx,
+      segIdx: hasSplits ? segIdx : -1,
+      initialValue: initVal,
+      color: line.color || this.activeColor
+    });
   }
 
   fitToScreen() {
@@ -875,6 +1021,7 @@ export class MeasureCanvas {
 
     this.canvas.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      this.commitInlineEditor(false);
       const rect = this.viewport.getBoundingClientRect();
       this.lastCursorPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const imgPt = this.screenToImg(e.clientX, e.clientY);
@@ -886,6 +1033,11 @@ export class MeasureCanvas {
 
     this.canvas.addEventListener("pointerdown", (e) => {
       if (e.button === 2) return;
+      if (this.inlineEditState) {
+        this.commitInlineEditor(true);
+        return;
+      }
+
       const rect = this.viewport.getBoundingClientRect();
       this.lastCursorPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
@@ -915,7 +1067,6 @@ export class MeasureCanvas {
           this.updateFloatingMoveHUD(true);
         } else {
           panStart = { x: e.clientX - this.offsetX, y: e.clientY - this.offsetY };
-          this.closeKeypad();
           this.updateFloatingMoveHUD(false);
         }
         this.render();
@@ -953,19 +1104,14 @@ export class MeasureCanvas {
         this.render();
         this.triggerSave();
       } else if (this.tool === "TEXT") {
-        const txt = prompt("輸入備註文字（如：實做闊: 1755、收口: 20）：");
-        if (txt && txt.trim()) {
-          this.pushHistory();
-          this.markers.push({
-            x: imgPt.x,
-            y: imgPt.y,
-            text: txt.trim(),
-            color: this.activeColor,
-            isStamp: false
-          });
-          this.render();
-          this.triggerSave();
-        }
+        isDown = false;
+        this.startInlineEdit({
+          kind: "marker",
+          x: imgPt.x,
+          y: imgPt.y,
+          initialValue: "",
+          color: this.activeColor
+        });
       } else if (this.tool === "ERASER") {
         this.eraseAt(imgPt);
       }
@@ -989,6 +1135,7 @@ export class MeasureCanvas {
           this.offsetY = midY - (midY - this.offsetY) * (nextScale / this.scale);
           this.scale = nextScale;
           this.render();
+          this.repositionInlineInput();
         }
         return;
       }
@@ -1008,12 +1155,13 @@ export class MeasureCanvas {
             historyPushedForDrag = true;
           }
           this.moveSelectedObject(dx, dy, imgPt);
-          this.syncFloatingPanels(this.lastCursorPos.x, this.lastCursorPos.y);
+          this.positionMoveHUD(this.lastCursorPos.x, this.lastCursorPos.y);
           this.render();
         } else if (panStart) {
           this.offsetX = e.clientX - panStart.x;
           this.offsetY = e.clientY - panStart.y;
           this.render();
+          this.repositionInlineInput();
         }
       } else if (draftLine) {
         const totalDx = imgPt.x - startPt.x;
@@ -1049,13 +1197,14 @@ export class MeasureCanvas {
           this.handleLineClickAction(idx, proj.t);
         } else if (type === "marker") {
           const m = this.markers[idx];
-          const nextTxt = prompt("修改標註文字：", m.text || "");
-          if (nextTxt !== null && nextTxt.trim()) {
-            this.pushHistory();
-            m.text = nextTxt.trim();
-            this.render();
-            this.triggerSave();
-          }
+          this.startInlineEdit({
+            kind: "marker",
+            markerIdx: idx,
+            x: m.x,
+            y: m.y,
+            initialValue: m.text || "",
+            color: m.color || this.activeColor
+          });
         }
       }
 
@@ -1071,7 +1220,7 @@ export class MeasureCanvas {
           const newIdx = this.lines.length - 1;
           this.render();
           this.triggerSave();
-          this.openKeypad(newIdx, 0);
+          this.openInlineLineEditor(newIdx, 0);
         } else {
           this.render();
         }
@@ -1106,6 +1255,7 @@ export class MeasureCanvas {
       this.offsetY = my - (my - this.offsetY) * (nextScale / this.scale);
       this.scale = nextScale;
       this.render();
+      this.repositionInlineInput();
     }, { passive: false });
   }
 
@@ -1135,16 +1285,16 @@ export class MeasureCanvas {
       this.render();
       this.triggerSave();
       const targetSeg = Math.max(0, line.splits.findIndex(sp => t <= sp));
-      this.openKeypad(lineIdx, targetSeg === -1 ? line.splits.length : targetSeg);
+      this.openInlineLineEditor(lineIdx, targetSeg === -1 ? line.splits.length : targetSeg);
       return;
     }
 
     if (line.splits.length > 0) {
       let segIdx = line.splits.findIndex(sp => t <= sp);
       if (segIdx === -1) segIdx = line.splits.length;
-      this.openKeypad(lineIdx, segIdx);
+      this.openInlineLineEditor(lineIdx, segIdx);
     } else {
-      this.openKeypad(lineIdx, 0);
+      this.openInlineLineEditor(lineIdx, 0);
     }
   }
 
@@ -1196,7 +1346,6 @@ export class MeasureCanvas {
     else if (hit.type === "path") this.paths.splice(hit.idx, 1);
     if (this.selectedObj?.type === hit.type && this.selectedObj?.idx === hit.idx) {
       this.selectedObj = null;
-      this.closeKeypad();
       this.updateFloatingMoveHUD(false);
     }
     this.render();
@@ -1245,10 +1394,11 @@ export class MeasureCanvas {
     const allLines = draftLine ? [...this.lines, draftLine] : this.lines;
     allLines.forEach((l, idx) => {
       const isSel = this.selectedObj?.type === "line" && this.selectedObj?.idx === idx;
-      this.drawRulerLine(ctx, l, isSel);
+      this.drawRulerLine(ctx, l, isSel, idx);
     });
 
     this.markers.forEach((m, idx) => {
+      if (this.inlineEditState?.kind === "marker" && this.inlineEditState?.markerIdx === idx) return;
       const isSel = this.selectedObj?.type === "marker" && this.selectedObj?.idx === idx;
       this.drawMarker(ctx, m, isSel);
     });
@@ -1318,7 +1468,7 @@ export class MeasureCanvas {
     ctx.restore();
   }
 
-  drawRulerLine(ctx, l, isSelected) {
+  drawRulerLine(ctx, l, isSelected, lineIdx = -1) {
     const color = l.color || "#2563EB";
     const lScale = l.lineScale || this.lineFactor;
     const fScale = l.fontScale || this.fontFactor;
@@ -1326,6 +1476,7 @@ export class MeasureCanvas {
     const headLen = lw * 3.1;
     const angle = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
     const fontSize = Math.max(10, Math.round((this.natW / 74) * fScale));
+    const isEditingThisLine = this.inlineEditState?.kind === "line" && this.inlineEditState?.lineIdx === lineIdx;
 
     ctx.save();
     ctx.strokeStyle = isSelected ? "#F59E0B" : color;
@@ -1375,11 +1526,12 @@ export class MeasureCanvas {
       const segVals = Array.isArray(l.segValues) ? l.segValues : [];
       let total = 0;
       for (let i = 0; i < ptsT.length - 1; i++) {
+        total += Number(segVals[i]) || 0;
+        if (isEditingThisLine && this.inlineEditState?.segIdx === i) continue;
         const midT = (ptsT[i] + ptsT[i + 1]) / 2;
         const mx = l.x1 + (l.x2 - l.x1) * midT;
         const my = l.y1 + (l.y2 - l.y1) * midT;
         const vStr = segVals[i] ? String(segVals[i]) : "·";
-        total += Number(segVals[i]) || 0;
         this.drawTightText(ctx, vStr, mx, my, fontSize, color, false);
       }
 
@@ -1390,7 +1542,7 @@ export class MeasureCanvas {
         const perpY = -Math.cos(angle) * (fontSize * 1.15);
         this.drawTightText(ctx, `總:${total}`, cx + perpX, cy + perpY, Math.max(10, Math.round(fontSize * 0.92)), color, false);
       }
-    } else {
+    } else if (!isEditingThisLine) {
       const label = l.text ? String(l.text) : (l.label ? String(l.label) : "");
       if (label) {
         const mx = (l.x1 + l.x2) / 2;
