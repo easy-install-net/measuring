@@ -1,13 +1,27 @@
 const STAMP_GROUPS = [
+  { name: "審圖批改", items: ["❌ 需修改", "✅ 確認無誤", "⚠️ 現場核對", "🔄 改尺寸", "📌 待補資料"] },
   { name: "電掣", items: ["13A單蘇", "13A孖蘇", "燈掣", "雙控掣", "數據掣", "電視掣", "冷氣掣", "曲架掣", "電箱"] },
   { name: "水煤", items: ["冷水喉", "熱水喉", "去水位", "地台去水", "煤氣掣", "煤氣錶"] },
   { name: "收口/結構", items: ["收口條", "見光板", "石膏線", "燈槽", "假天花底", "橫樑陣位", "柱位", "暗門", "地腳線"] }
 ];
 
+// 8 色高對比色盤（碳黑、亮藍、鮮綠、亮紫、鮮紅、亮橙、螢光黃、純白）
+const PALETTE_COLORS = [
+  "#1E293B", // 碳黑
+  "#2563EB", // 亮藍
+  "#16A34A", // 鮮綠
+  "#9333EA", // 亮紫
+  "#EF4444", // 鮮紅
+  "#F97316", // 亮橙
+  "#FACC15", // 螢光黃
+  "#FFFFFF"  // 純白
+];
+
 export class MeasureCanvas {
-  constructor(container, imageUrl, initialData, rulerColors, onSave) {
+  constructor(container, imageUrl, initialData, rulerColors, onSave, navHooks = {}) {
     this.container = container;
     this.imageUrl = imageUrl;
+    this.navHooks = navHooks;
 
     if (Array.isArray(initialData)) {
       this.lines = JSON.parse(JSON.stringify(initialData));
@@ -23,15 +37,12 @@ export class MeasureCanvas {
       this.stickers = JSON.parse(JSON.stringify(initialData?.stickers || []));
     }
 
-    const rawColors = (rulerColors && rulerColors.length)
-      ? rulerColors.map(c => typeof c === "string" ? c : c.hex)
-      : ["#EF4444", "#2563EB", "#16A34A", "#D97706", "#9333EA", "#111827"];
-    this.colors = rawColors.filter(Boolean);
-    this.activeColor = this.colors[0] || "#EF4444";
+    this.colors = [...PALETTE_COLORS];
+    this.activeColor = "#EF4444";
     this.onSave = onSave;
 
     this.tool = "RULER";
-    this.activeStamp = "13A孖蘇";
+    this.activeStamp = "❌ 需修改";
     this.fontFactor = Number(localStorage.getItem("mc_font_factor")) || 1.0;
     this.lineFactor = Number(localStorage.getItem("mc_line_factor")) || 1.0;
 
@@ -43,7 +54,7 @@ export class MeasureCanvas {
     this.selectedObj = null;
     this.inlineState = null;
     this.stickerCache = new Map();
-    this.lastCursorPos = { x: 140, y: 120 };
+    this.calcExpr = "";
 
     this.loadBaseImage(imageUrl, true);
   }
@@ -117,7 +128,7 @@ export class MeasureCanvas {
     this.stickers = prev.stickers || [];
     this.preloadStickers();
     this.selectedObj = null;
-    this.updateHUD(false);
+    this.updateObjectHUD();
     if (prev.imageUrl && prev.imageUrl !== this.imageUrl) {
       this.imageUrl = prev.imageUrl;
       this.loadBaseImage(prev.imageUrl, false);
@@ -149,47 +160,72 @@ export class MeasureCanvas {
     this.triggerSave();
   }
 
-  triggerSave() {
+  triggerSave(extra = {}) {
     if (this.onSave) {
       this.onSave({
         lines: this.lines,
         markers: this.markers,
         paths: this.paths,
         walls: this.walls,
-        stickers: this.stickers
+        stickers: this.stickers,
+        ...extra
       });
     }
   }
 
   initUI() {
     this.container.innerHTML = `
-      <div class="mc-wrapper" style="background:#111827; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; user-select:none;">
-        <!-- 頂部工具列：全部集中正中對齊 -->
-        <div style="display:flex; justify-content:center; align-items:center; padding:6px 12px; background:#1F2937; border-bottom:1px solid #374151; flex-wrap:wrap; gap:14px;">
+      <div class="mc-wrapper" style="width:100%; height:100%; background:#0F172A; display:flex; flex-direction:column; user-select:none; overflow:hidden;">
+        <!-- 頂部單行極簡工具列：左預設大小、中 8 色盤、右純圖示 -->
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 10px; background:#1F2937; border-bottom:1px solid #374151; flex-wrap:wrap; gap:8px; z-index:20;">
+          <!-- 最左側：預設字大小 & 線大小 -->
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div style="display:flex; align-items:center; gap:4px;">
+              <span style="font-size:11px; color:#D1D5DB; font-weight:700;">預設字大小</span>
+              <input type="range" id="mc-def-font" min="0.4" max="2.2" step="0.05" value="${this.fontFactor}" style="width:68px; accent-color:#3B82F6; cursor:pointer;">
+            </div>
+            <div style="display:flex; align-items:center; gap:4px;">
+              <span style="font-size:11px; color:#D1D5DB; font-weight:700;">線大小</span>
+              <input type="range" id="mc-def-line" min="0.4" max="2.2" step="0.05" value="${this.lineFactor}" style="width:68px; accent-color:#10B981; cursor:pointer;">
+            </div>
+          </div>
+
+          <!-- 正中間：8 色高對比調色盤 -->
           <div style="display:flex; align-items:center; gap:6px;">
             ${this.colors.map(c => `
               <button type="button" class="mc-color-btn" data-color="${c}"
-                      style="width:20px; height:20px; border-radius:50%; background:${c}; border:${c === this.activeColor ? "2.5px solid #FFF" : "1px solid #6B7280"}; cursor:pointer;"></button>
+                      style="width:20px; height:20px; border-radius:50%; background:${c}; border:${c === this.activeColor ? "2.5px solid #38BDF8" : "1.5px solid #9CA3AF"}; box-shadow:0 0 3px rgba(0,0,0,0.8); cursor:pointer;"></button>
             `).join("")}
           </div>
-          <div style="width:1px; height:16px; background:#4B5563;"></div>
-          <div style="display:flex; align-items:center; gap:6px;">
-            <button type="button" id="mc-fit" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;">重置視角</button>
-            <button type="button" id="mc-undo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;">↩ 復原</button>
-            <button type="button" id="mc-redo" class="btn-outline btn-sm" style="background:#374151; color:#FFF; border-color:#4B5563; padding:3px 9px; font-size:12px;">↪ 重做</button>
+
+          <!-- 最右側：純圖示按鈕（重置視角、復原、重做、匯出批改圖、全螢幕） -->
+          <div style="display:flex; align-items:center; gap:5px;">
+            <button type="button" id="mc-fit" title="重置視角" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:30px; height:26px; font-size:14px; cursor:pointer;">⊡</button>
+            <button type="button" id="mc-undo" title="復原" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:30px; height:26px; font-size:14px; cursor:pointer;">↩</button>
+            <button type="button" id="mc-redo" title="重做" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:30px; height:26px; font-size:14px; cursor:pointer;">↪</button>
+            <button type="button" id="mc-export-img" title="下載帶標註批改圖" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:30px; height:26px; font-size:14px; cursor:pointer;">📸</button>
+            <button type="button" id="mc-browser-fs" title="切換瀏覽器全螢幕" style="background:#374151; color:#FFF; border:1px solid #4B5563; border-radius:5px; width:30px; height:26px; font-size:14px; cursor:pointer;">⛶</button>
           </div>
         </div>
 
-        <div id="mc-viewport" style="position:relative; width:100%; height:74vh; min-height:440px; background:#0F172A; overflow:hidden; touch-action:none;">
+        <!-- 滿版畫布主視窗 -->
+        <div id="mc-viewport" style="position:relative; flex:1; width:100%; height:100%; background:#0F172A; overflow:hidden; touch-action:none;">
           <canvas id="mc-canvas" style="display:block; width:100%; height:100%;"></canvas>
           <input type="file" id="mc-sticker-input" accept="image/*" class="hidden">
 
-          <!-- 就地直接打字輸入框（零跳窗） -->
-          <input type="text" id="mc-inline-input" class="hidden" autocomplete="off" spellcheck="false"
-                 style="position:absolute; transform:translate(-50%, -50%); background:rgba(255,255,255,0.96); border:1.5px dashed #2563EB; border-radius:4px; padding:1px 6px; text-align:center; font-weight:700; outline:none; z-index:25; min-width:56px; box-shadow:0 2px 8px rgba(0,0,0,0.22);" />
+          <!-- 左右兩側懸浮翻頁小箭嘴 -->
+          ${this.navHooks.hasPrev ? `
+            <button type="button" id="mc-side-prev" title="上一頁"
+                    style="position:absolute; left:8px; top:50%; transform:translateY(-50%); width:36px; height:58px; border-radius:10px; background:rgba(17,24,39,0.72); color:#FFF; border:1px solid rgba(255,255,255,0.22); font-size:24px; font-weight:700; cursor:pointer; z-index:16; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(4px);">‹</button>
+          ` : ""}
+          ${this.navHooks.hasNext ? `
+            <button type="button" id="mc-side-next" title="下一頁"
+                    style="position:absolute; right:8px; top:50%; transform:translateY(-50%); width:36px; height:58px; border-radius:10px; background:rgba(17,24,39,0.72); color:#FFF; border:1px solid rgba(255,255,255,0.22); font-size:24px; font-weight:700; cursor:pointer; z-index:16; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(4px);">›</button>
+          ` : ""}
 
-          <!-- 左側打直懸浮工具條 -->
-          <div style="position:absolute; left:10px; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:5px; background:rgba(17,24,39,0.88); backdrop-filter:blur(6px); padding:6px 5px; border-radius:12px; border:1px solid rgba(255,255,255,0.16); box-shadow:0 8px 24px rgba(0,0,0,0.45); z-index:15;">
+          <!-- 打橫可自由拖拉浮動工具條（預設上方中央） -->
+          <div id="mc-float-dock" style="position:absolute; top:12px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; background:rgba(17,24,39,0.88); backdrop-filter:blur(6px); padding:4px 7px; border-radius:12px; border:1px solid rgba(255,255,255,0.2); box-shadow:0 8px 24px rgba(0,0,0,0.45); z-index:17;">
+            <div id="mc-dock-drag" title="按住拖拉工具列位置" style="cursor:grab; color:#9CA3AF; font-size:13px; padding:4px 3px; letter-spacing:-2px;">⋮⋮</div>
             ${[
               { id: "PAN", icon: "✋", label: "移動" },
               { id: "RULER", icon: "📏", label: "拉尺" },
@@ -201,15 +237,25 @@ export class MeasureCanvas {
               { id: "ERASER", icon: "🧹", label: "擦除" }
             ].map(t => `
               <button type="button" class="mc-tool-btn" data-tool="${t.id}"
-                      style="display:flex; flex-direction:column; align-items:center; justify-content:center; width:44px; padding:5px 2px; border-radius:8px; cursor:pointer; border:1px solid ${t.id === this.tool ? "#60A5FA" : "transparent"}; background:${t.id === this.tool ? "#2563EB" : "transparent"}; color:#FFF;">
-                <span style="font-size:15px; line-height:1.1;">${t.icon}</span>
-                <span style="font-size:10px; font-weight:700; margin-top:2px;">${t.label}</span>
+                      style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:38px; padding:4px 4px; border-radius:8px; cursor:pointer; border:1px solid ${t.id === this.tool ? "#60A5FA" : "transparent"}; background:${t.id === this.tool ? "#2563EB" : "transparent"}; color:#FFF;">
+                <span style="font-size:14px; line-height:1.1;">${t.icon}</span>
+                <span style="font-size:9px; font-weight:700; margin-top:2px;">${t.label}</span>
               </button>
             `).join("")}
+            <div style="width:1px; height:22px; background:#374151; margin:0 2px;"></div>
+            <button type="button" id="mc-toggle-calc"
+                    style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-width:38px; padding:4px 4px; border-radius:8px; cursor:pointer; border:1px solid transparent; background:transparent; color:#FACC15;">
+              <span style="font-size:14px; line-height:1.1;">🧮</span>
+              <span style="font-size:9px; font-weight:700; margin-top:2px;">計數機</span>
+            </button>
           </div>
 
+          <!-- 就地直接打字輸入框（透明底反差描邊，無跳窗） -->
+          <input type="text" id="mc-inline-input" class="hidden" autocomplete="off" spellcheck="false"
+                 style="position:absolute; transform:translate(-50%, -50%); background:rgba(15,23,42,0.82); border:1.5px dashed #38BDF8; border-radius:4px; padding:1px 6px; text-align:center; font-weight:800; outline:none; z-index:25; min-width:56px;" />
+
           <!-- 精緻懸浮印章卡片 -->
-          <div id="mc-stamp-drawer" class="hidden" style="position:absolute; left:66px; top:50%; transform:translateY(-50%); width:260px; max-height:70vh; overflow-y:auto; background:rgba(255,255,255,0.96); padding:10px; border-radius:12px; border:1.5px solid #CBD5E1; box-shadow:0 12px 30px rgba(0,0,0,0.4); z-index:19; display:flex; flex-direction:column; gap:8px;">
+          <div id="mc-stamp-drawer" class="hidden" style="position:absolute; left:50%; top:64px; transform:translateX(-50%); width:290px; max-height:66vh; overflow-y:auto; background:rgba(255,255,255,0.97); padding:10px; border-radius:12px; border:1.5px solid #CBD5E1; box-shadow:0 12px 30px rgba(0,0,0,0.45); z-index:19; display:flex; flex-direction:column; gap:8px;">
             <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:4px;">
               <span style="font-size:12px; font-weight:800; color:#1E293B;">🔖 選擇印章（點圖紙蓋章）</span>
               <button type="button" id="mc-stamp-close" style="border:none; background:none; font-size:14px; cursor:pointer; color:#64748B;">✕</button>
@@ -226,41 +272,35 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 隨身浮動控制條（含一鍵確定合併貼圖） -->
-          <div id="mc-move-hud" class="hidden" style="position:absolute; left:72px; top:14px; background:rgba(17,24,39,0.95); border:1px solid rgba(96,165,250,0.7); border-radius:10px; padding:8px 10px; box-shadow:0 10px 26px rgba(0,0,0,0.5); z-index:18; display:flex; flex-direction:column; gap:7px; width:230px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #374151; padding-bottom:4px;">
-              <span id="mc-hud-target" style="font-size:11px; font-weight:700; color:#93C5FD;">✋ 移動調整（全域比例）</span>
-              <button type="button" id="mc-hud-del" class="hidden" style="background:#DC2626; color:#FFF; border:none; border-radius:4px; padding:2px 6px; font-size:10px; font-weight:700; cursor:pointer;">🗑️ 刪除</button>
+          <!-- 極簡隨身迷你控制條（只管單一選中物件獨立縮放，無廢話） -->
+          <div id="mc-obj-hud" class="hidden" style="position:absolute; left:50%; bottom:16px; transform:translateX(-50%); background:rgba(17,24,39,0.92); border:1px solid rgba(96,165,250,0.65); border-radius:10px; padding:6px 10px; box-shadow:0 8px 20px rgba(0,0,0,0.45); z-index:18; display:flex; align-items:center; gap:10px;">
+            <div id="mc-obj-font-row" class="hidden" style="display:flex; align-items:center; gap:5px;">
+              <span style="font-size:11px; color:#E5E7EB; font-weight:700;">字</span>
+              <input type="range" id="mc-obj-font" min="0.4" max="2.5" step="0.05" value="1" style="width:76px; accent-color:#3B82F6; cursor:pointer;">
             </div>
-
-            <button type="button" id="mc-hud-merge-sticker" class="hidden" style="background:#059669; color:#FFF; border:none; border-radius:6px; padding:6px 8px; font-size:12px; font-weight:700; cursor:pointer; text-align:center;">
-              📌 確定合併進底圖（防丟失）
-            </button>
-
-            <div style="display:flex; align-items:center; gap:6px;">
-              <span style="font-size:11px; color:#D1D5DB; min-width:28px;">顏色</span>
-              <div style="display:flex; gap:5px; flex-wrap:wrap;">
-                ${this.colors.map(c => `
-                  <button type="button" class="mc-hud-color" data-color="${c}"
-                          style="width:18px; height:18px; border-radius:50%; background:${c}; border:1.5px solid #E5E7EB; cursor:pointer;"></button>
-                `).join("")}
-              </div>
+            <div id="mc-obj-line-row" class="hidden" style="display:flex; align-items:center; gap:5px;">
+              <span style="font-size:11px; color:#E5E7EB; font-weight:700;">線</span>
+              <input type="range" id="mc-obj-line" min="0.4" max="2.5" step="0.05" value="1" style="width:76px; accent-color:#10B981; cursor:pointer;">
             </div>
+            <button type="button" id="mc-obj-merge" class="hidden" style="background:#059669; color:#FFF; border:none; border-radius:5px; padding:4px 9px; font-size:11px; font-weight:700; cursor:pointer;">📌 合併底圖</button>
+            <button type="button" id="mc-obj-del" style="background:#DC2626; color:#FFF; border:none; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;">🗑️</button>
+          </div>
 
-            <div style="display:flex; align-items:center; gap:6px;">
-              <span style="font-size:11px; color:#D1D5DB; min-width:28px;">文字</span>
-              <button type="button" id="mc-font-dec" style="width:22px; height:22px; border-radius:4px; background:#374151; color:#FFF; border:1px solid #4B5563; font-weight:700; cursor:pointer;">-</button>
-              <input type="range" id="mc-font-slider" min="0.4" max="2.2" step="0.05" value="${this.fontFactor}" style="flex:1; accent-color:#3B82F6; cursor:pointer;">
-              <button type="button" id="mc-font-inc" style="width:22px; height:22px; border-radius:4px; background:#374151; color:#FFF; border:1px solid #4B5563; font-weight:700; cursor:pointer;">+</button>
-              <span id="mc-font-val" style="font-size:10px; color:#93C5FD; min-width:30px; text-align:right;">${Math.round(this.fontFactor * 100)}%</span>
+          <!-- 浮面可拖動計數機 -->
+          <div id="mc-calc-box" class="hidden" style="position:absolute; right:54px; top:66px; width:210px; background:rgba(17,24,39,0.94); border:1px solid #4B5563; border-radius:12px; padding:8px; box-shadow:0 12px 28px rgba(0,0,0,0.55); z-index:22; display:flex; flex-direction:column; gap:6px;">
+            <div id="mc-calc-drag" style="display:flex; justify-content:space-between; align-items:center; cursor:grab; padding-bottom:2px;">
+              <span style="font-size:11px; color:#9CA3AF; font-weight:700;">🧮 工程計數機（可拖拉）</span>
+              <button type="button" id="mc-calc-close" style="background:none; border:none; color:#9CA3AF; font-size:13px; cursor:pointer;">✕</button>
             </div>
-
-            <div style="display:flex; align-items:center; gap:6px;">
-              <span style="font-size:11px; color:#D1D5DB; min-width:28px;">線條</span>
-              <button type="button" id="mc-line-dec" style="width:22px; height:22px; border-radius:4px; background:#374151; color:#FFF; border:1px solid #4B5563; font-weight:700; cursor:pointer;">-</button>
-              <input type="range" id="mc-line-slider" min="0.4" max="2.2" step="0.05" value="${this.lineFactor}" style="flex:1; accent-color:#10B981; cursor:pointer;">
-              <button type="button" id="mc-line-inc" style="width:22px; height:22px; border-radius:4px; background:#374151; color:#FFF; border:1px solid #4B5563; font-weight:700; cursor:pointer;">+</button>
-              <span id="mc-line-val" style="font-size:10px; color:#6EE7B7; min-width:30px; text-align:right;">${Math.round(this.lineFactor * 100)}%</span>
+            <div style="display:flex; gap:4px;">
+              <input type="text" id="mc-calc-display" readonly value="0" style="flex:1; width:100%; background:#0F172A; color:#FACC15; border:1px solid #374151; border-radius:6px; padding:5px 7px; font-size:16px; font-weight:800; text-align:right;" />
+              <button type="button" id="mc-calc-copy" title="複製數字" style="background:#2563EB; color:#FFF; border:none; border-radius:6px; padding:0 8px; font-size:11px; font-weight:700; cursor:pointer;">複製</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:4px;">
+              ${["C", "⌫", "/", "*", "7", "8", "9", "-", "4", "5", "6", "+", "1", "2", "3", "=", "0", "."].map(k => `
+                <button type="button" class="mc-calc-key" data-k="${k}"
+                        style="padding:7px 0; border-radius:6px; border:none; font-size:13px; font-weight:700; cursor:pointer; grid-column:${k === "0" ? "span 2" : (k === "=" ? "span 2" : "auto")}; background:${k === "=" ? "#10B981" : (["/", "*", "-", "+"].includes(k) ? "#374151" : (["C", "⌫"].includes(k) ? "#7F1D1D" : "#1F2937"))}; color:#FFF;">${k}</button>
+              `).join("")}
             </div>
           </div>
         </div>
@@ -273,18 +313,96 @@ export class MeasureCanvas {
     this.inlineInput = document.getElementById("mc-inline-input");
 
     this.bindToolbarEvents();
+    this.bindDraggableFloaters();
+    this.bindCalculatorEvents();
     this.bindInlineEvents();
     this.bindGlobalShortcuts();
     this.bindPointerEvents();
     window.addEventListener("resize", () => { this.render(); this.positionInline(); });
   }
 
+  makeDraggable(boxEl, handleEl) {
+    if (!boxEl || !handleEl) return;
+    let dragging = false, sx = 0, sy = 0, bl = 0, bt = 0;
+    handleEl.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      dragging = true;
+      handleEl.setPointerCapture(e.pointerId);
+      const rect = boxEl.getBoundingClientRect();
+      const vRect = this.viewport.getBoundingClientRect();
+      boxEl.style.transform = "none";
+      boxEl.style.right = "auto";
+      boxEl.style.bottom = "auto";
+      boxEl.style.left = `${rect.left - vRect.left}px`;
+      boxEl.style.top = `${rect.top - vRect.top}px`;
+      sx = e.clientX; sy = e.clientY;
+      bl = rect.left - vRect.left;
+      bt = rect.top - vRect.top;
+    });
+    handleEl.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const vw = this.viewport.clientWidth, vh = this.viewport.clientHeight;
+      const nx = Math.max(4, Math.min(vw - boxEl.offsetWidth - 4, bl + (e.clientX - sx)));
+      const ny = Math.max(4, Math.min(vh - boxEl.offsetHeight - 4, bt + (e.clientY - sy)));
+      boxEl.style.left = `${nx}px`;
+      boxEl.style.top = `${ny}px`;
+    });
+    const stop = () => { dragging = false; };
+    handleEl.addEventListener("pointerup", stop);
+    handleEl.addEventListener("pointercancel", stop);
+  }
+
+  bindDraggableFloaters() {
+    this.makeDraggable(document.getElementById("mc-float-dock"), document.getElementById("mc-dock-drag"));
+    this.makeDraggable(document.getElementById("mc-calc-box"), document.getElementById("mc-calc-drag"));
+  }
+
+  bindCalculatorEvents() {
+    const calcBox = document.getElementById("mc-calc-box");
+    const disp = document.getElementById("mc-calc-display");
+    const copyBtn = document.getElementById("mc-calc-copy");
+
+    document.getElementById("mc-toggle-calc").onclick = () => calcBox.classList.toggle("hidden");
+    document.getElementById("mc-calc-close").onclick = () => calcBox.classList.add("hidden");
+
+    copyBtn.onclick = () => {
+      const val = disp.value;
+      if (navigator.clipboard) navigator.clipboard.writeText(val).catch(() => {});
+      if (this.inlineState && !this.inlineInput.classList.contains("hidden")) {
+        this.inlineInput.value = val;
+        this.inlineInput.focus();
+      }
+      copyBtn.textContent = "已複製";
+      setTimeout(() => { copyBtn.textContent = "複製"; }, 1000);
+    };
+
+    this.container.querySelectorAll(".mc-calc-key").forEach(btn => {
+      btn.onclick = () => {
+        const k = btn.dataset.k;
+        if (k === "C") { this.calcExpr = ""; disp.value = "0"; }
+        else if (k === "⌫") { this.calcExpr = this.calcExpr.slice(0, -1); disp.value = this.calcExpr || "0"; }
+        else if (k === "=") {
+          try {
+            const safe = this.calcExpr.replace(/[^0-9+\-*/.()]/g, "");
+            const ans = safe ? Function(`"use strict"; return (${safe})`)() : 0;
+            const rounded = Math.round(ans * 100) / 100;
+            this.calcExpr = String(rounded);
+            disp.value = this.calcExpr;
+          } catch (_) { disp.value = "錯誤"; this.calcExpr = ""; }
+        } else {
+          this.calcExpr += k;
+          disp.value = this.calcExpr;
+        }
+      };
+    });
+  }
+
   startInline(state) {
     this.commitInline(false);
     this.inlineState = state;
     this.inlineInput.value = state.val || "";
-    this.inlineInput.placeholder = state.kind === "line" ? "數字(如1755-5)" : "輸入文字...";
-    this.inlineInput.style.color = state.color || this.activeColor;
+    this.inlineInput.placeholder = state.kind === "line" ? "輸入數字..." : "輸入文字...";
+    this.inlineInput.style.color = state.color === "#1E293B" ? "#FACC15" : (state.color || "#38BDF8");
     this.inlineInput.classList.remove("hidden");
     this.positionInline();
     this.render();
@@ -314,7 +432,7 @@ export class MeasureCanvas {
     }
     const sx = ix * this.scale + this.offsetX;
     const sy = iy * this.scale + this.offsetY;
-    const fs = Math.max(13, Math.round((this.natW / 74) * fScale * this.scale));
+    const fs = Math.max(14, Math.round((this.natW / 72) * fScale * this.scale));
     this.inlineInput.style.left = `${sx}px`;
     this.inlineInput.style.top = `${sy}px`;
     this.inlineInput.style.fontSize = `${fs}px`;
@@ -396,64 +514,89 @@ export class MeasureCanvas {
       this.stickers.splice(idx, 1);
       this.selectedObj = null;
       this.imageUrl = merged;
-      this.updateHUD(false);
+      this.updateObjectHUD();
       this.loadBaseImage(merged, false);
-      this.triggerSave();
-    } catch (e) {
-      alert("原底圖受跨網域限制，無法直接合併；請先下載截圖再換底圖上傳。");
+      this.triggerSave({ mergedBaseUrl: merged });
+    } catch (_) {
+      alert("原底圖受跨網域限制，無法直接合併；請點右上角「📸」下載合併圖片。");
     }
   }
 
-  updateHUD(moveNearCursor = false) {
-    const hud = document.getElementById("mc-move-hud");
+  exportAnnotatedImage() {
+    if (!this.img) return;
+    this.commitInline(false);
+    const prevSel = this.selectedObj;
+    const prevTool = this.tool;
+    this.selectedObj = null;
+    this.tool = "EXPORT";
+
+    const off = document.createElement("canvas");
+    off.width = this.natW;
+    off.height = this.natH;
+    const octx = off.getContext("2d");
+    octx.drawImage(this.img, 0, 0, this.natW, this.natH);
+
+    this.stickers.forEach(st => {
+      const src = st.url || st.src || st.dataUrl;
+      const im = src ? this.stickerCache.get(src) : null;
+      if (im && im.complete) octx.drawImage(im, st.x, st.y, st.w, st.h);
+    });
+    this.paths.forEach(p => this.drawStrokePath(octx, p, false));
+    this.lines.forEach((l, idx) => this.drawRulerLine(octx, l, false, idx));
+    this.markers.forEach(m => {
+      if (!m.text) return;
+      const fs = Math.max(12, Math.round((this.natW / 72) * (m.fontScale || this.fontFactor)));
+      this.drawHaloText(octx, m.text, m.x, m.y, fs, m.color || "#EF4444", m.isStamp === true);
+    });
+
+    this.selectedObj = prevSel;
+    this.tool = prevTool;
+
+    try {
+      const url = off.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `批改圖紙_${Date.now()}.png`;
+      a.click();
+    } catch (_) {
+      alert("匯出失敗，請使用系統截圖。");
+    }
+  }
+
+  // 極簡迷你控制條：只針對單一選中物件獨立縮放，絕無多餘文字或全域連動
+  updateObjectHUD() {
+    const hud = document.getElementById("mc-obj-hud");
     if (!hud) return;
-    if (this.tool !== "PAN") { hud.classList.add("hidden"); return; }
-
-    hud.classList.remove("hidden");
-    const targetLabel = document.getElementById("mc-hud-target");
-    const delBtn = document.getElementById("mc-hud-del");
-    const mergeBtn = document.getElementById("mc-hud-merge-sticker");
-    const fontSlider = document.getElementById("mc-font-slider");
-    const lineSlider = document.getElementById("mc-line-slider");
-    const fontVal = document.getElementById("mc-font-val");
-    const lineVal = document.getElementById("mc-line-val");
-
-    let curFont = this.fontFactor, curLine = this.lineFactor;
-    mergeBtn.classList.add("hidden");
-
-    if (this.selectedObj) {
-      delBtn.classList.remove("hidden");
-      const { type, idx } = this.selectedObj;
-      if (type === "line" && this.lines[idx]) {
-        targetLabel.textContent = "📏 單獨調整選中拉尺";
-        curFont = this.lines[idx].fontScale || this.fontFactor;
-        curLine = this.lines[idx].lineScale || this.lineFactor;
-      } else if (type === "marker" && this.markers[idx]) {
-        targetLabel.textContent = "🔤 單獨調整選中文字/印章";
-        curFont = this.markers[idx].fontScale || this.fontFactor;
-      } else if (type === "path" && this.paths[idx]) {
-        targetLabel.textContent = "✏️ 單獨調整選中筆跡";
-        curLine = this.paths[idx].lineScale || this.lineFactor;
-      } else if (type === "sticker") {
-        targetLabel.textContent = "🖼️ 已選中貼圖（拖右下角縮放）";
-        mergeBtn.classList.remove("hidden");
-      }
-    } else {
-      delBtn.classList.add("hidden");
-      targetLabel.textContent = "✋ 移動調整（全域比例）";
+    if (this.tool !== "PAN" || !this.selectedObj) {
+      hud.classList.add("hidden");
+      return;
     }
 
-    fontSlider.value = curFont;
-    lineSlider.value = curLine;
-    fontVal.textContent = `${Math.round(curFont * 100)}%`;
-    lineVal.textContent = `${Math.round(curLine * 100)}%`;
+    hud.classList.remove("hidden");
+    const fontRow = document.getElementById("mc-obj-font-row");
+    const lineRow = document.getElementById("mc-obj-line-row");
+    const mergeBtn = document.getElementById("mc-obj-merge");
+    const fontInput = document.getElementById("mc-obj-font");
+    const lineInput = document.getElementById("mc-obj-line");
 
-    if (moveNearCursor && this.viewport) {
-      const vw = this.viewport.clientWidth || 600, vh = this.viewport.clientHeight || 440;
-      let left = Math.max(66, Math.min(vw - 240, this.lastCursorPos.x + 16));
-      let top = Math.max(10, Math.min(vh - 170, this.lastCursorPos.y + 16));
-      hud.style.left = `${left}px`;
-      hud.style.top = `${top}px`;
+    fontRow.classList.add("hidden");
+    lineRow.classList.add("hidden");
+    mergeBtn.classList.add("hidden");
+
+    const { type, idx } = this.selectedObj;
+    if (type === "line" && this.lines[idx]) {
+      fontRow.classList.remove("hidden");
+      lineRow.classList.remove("hidden");
+      fontInput.value = this.lines[idx].fontScale || this.fontFactor;
+      lineInput.value = this.lines[idx].lineScale || this.lineFactor;
+    } else if (type === "marker" && this.markers[idx]) {
+      fontRow.classList.remove("hidden");
+      fontInput.value = this.markers[idx].fontScale || this.fontFactor;
+    } else if (type === "path" && this.paths[idx]) {
+      lineRow.classList.remove("hidden");
+      lineInput.value = this.paths[idx].lineScale || this.lineFactor;
+    } else if (type === "sticker") {
+      mergeBtn.classList.remove("hidden");
     }
   }
 
@@ -486,7 +629,7 @@ export class MeasureCanvas {
     else if (type === "path") this.paths.splice(idx, 1);
     else if (type === "sticker") this.stickers.splice(idx, 1);
     this.selectedObj = null;
-    this.updateHUD(false);
+    this.updateObjectHUD();
     this.render();
     this.triggerSave();
   }
@@ -505,7 +648,7 @@ export class MeasureCanvas {
         this.stickers.push({ x: cx - w / 2, y: cy - h / 2, w, h, url: dataUrl });
         this.stickerCache.set(dataUrl, im);
         this.selectedObj = { type: "sticker", idx: this.stickers.length - 1, part: "body" };
-        this.setTool("PAN", true);
+        this.setTool("PAN");
         this.render();
         this.triggerSave();
       };
@@ -514,9 +657,10 @@ export class MeasureCanvas {
     reader.readAsDataURL(file);
   }
 
-  setTool(toolId, nearCursor = false) {
+  setTool(toolId) {
     this.commitInline(false);
     this.tool = toolId;
+    if (this.tool !== "PAN") this.selectedObj = null;
     this.container.querySelectorAll(".mc-tool-btn").forEach(b => {
       const active = b.dataset.tool === this.tool;
       b.style.background = active ? "#2563EB" : "transparent";
@@ -527,15 +671,31 @@ export class MeasureCanvas {
       if (this.tool === "STAMP") drawer.classList.remove("hidden");
       else drawer.classList.add("hidden");
     }
-    this.updateHUD(nearCursor);
+    this.updateObjectHUD();
+    this.render();
   }
 
   bindToolbarEvents() {
-    this.container.querySelectorAll(".mc-color-btn, .mc-hud-color").forEach(btn => {
+    // 頂部最左側：全域預設字大小 & 線大小
+    const defFont = document.getElementById("mc-def-font");
+    const defLine = document.getElementById("mc-def-line");
+    defFont.oninput = () => {
+      this.fontFactor = Number(defFont.value);
+      localStorage.setItem("mc_font_factor", String(this.fontFactor));
+      this.render();
+    };
+    defLine.oninput = () => {
+      this.lineFactor = Number(defLine.value);
+      localStorage.setItem("mc_line_factor", String(this.lineFactor));
+      this.render();
+    };
+
+    // 頂部中間：8 色盤
+    this.container.querySelectorAll(".mc-color-btn").forEach(btn => {
       btn.onclick = () => {
         this.activeColor = btn.dataset.color;
         this.container.querySelectorAll(".mc-color-btn").forEach(b => {
-          b.style.border = b.dataset.color === this.activeColor ? "2.5px solid #FFF" : "1px solid #6B7280";
+          b.style.border = b.dataset.color === this.activeColor ? "2.5px solid #38BDF8" : "1.5px solid #9CA3AF";
         });
         if (this.selectedObj) {
           const { type, idx } = this.selectedObj;
@@ -549,39 +709,29 @@ export class MeasureCanvas {
       };
     });
 
-    const changeFont = (v, save) => {
-      const c = Math.max(0.4, Math.min(2.2, Number(v.toFixed(2))));
-      if (this.selectedObj?.type === "line") this.lines[this.selectedObj.idx].fontScale = c;
-      else if (this.selectedObj?.type === "marker") this.markers[this.selectedObj.idx].fontScale = c;
-      else { this.fontFactor = c; localStorage.setItem("mc_font_factor", String(c)); }
-      if (save && this.selectedObj) this.triggerSave();
-      this.updateHUD(false);
+    // 選中物件的獨立縮放條
+    const objFont = document.getElementById("mc-obj-font");
+    const objLine = document.getElementById("mc-obj-line");
+    objFont.oninput = () => {
+      if (!this.selectedObj) return;
+      const v = Number(objFont.value);
+      if (this.selectedObj.type === "line") this.lines[this.selectedObj.idx].fontScale = v;
+      else if (this.selectedObj.type === "marker") this.markers[this.selectedObj.idx].fontScale = v;
       this.render();
     };
-    const changeLine = (v, save) => {
-      const c = Math.max(0.4, Math.min(2.2, Number(v.toFixed(2))));
-      if (this.selectedObj?.type === "line") this.lines[this.selectedObj.idx].lineScale = c;
-      else if (this.selectedObj?.type === "path") this.paths[this.selectedObj.idx].lineScale = c;
-      else { this.lineFactor = c; localStorage.setItem("mc_line_factor", String(c)); }
-      if (save && this.selectedObj) this.triggerSave();
-      this.updateHUD(false);
+    objFont.onchange = () => { if (this.selectedObj) this.triggerSave(); };
+
+    objLine.oninput = () => {
+      if (!this.selectedObj) return;
+      const v = Number(objLine.value);
+      if (this.selectedObj.type === "line") this.lines[this.selectedObj.idx].lineScale = v;
+      else if (this.selectedObj.type === "path") this.paths[this.selectedObj.idx].lineScale = v;
       this.render();
     };
+    objLine.onchange = () => { if (this.selectedObj) this.triggerSave(); };
 
-    const fsSlider = document.getElementById("mc-font-slider");
-    fsSlider.oninput = () => changeFont(Number(fsSlider.value), false);
-    fsSlider.onchange = () => changeFont(Number(fsSlider.value), true);
-    document.getElementById("mc-font-dec").onclick = () => changeFont(Number(fsSlider.value) - 0.1, true);
-    document.getElementById("mc-font-inc").onclick = () => changeFont(Number(fsSlider.value) + 0.1, true);
-
-    const lnSlider = document.getElementById("mc-line-slider");
-    lnSlider.oninput = () => changeLine(Number(lnSlider.value), false);
-    lnSlider.onchange = () => changeLine(Number(lnSlider.value), true);
-    document.getElementById("mc-line-dec").onclick = () => changeLine(Number(lnSlider.value) - 0.1, true);
-    document.getElementById("mc-line-inc").onclick = () => changeLine(Number(lnSlider.value) + 0.1, true);
-
-    document.getElementById("mc-hud-del").onclick = () => this.deleteSelected();
-    document.getElementById("mc-hud-merge-sticker").onclick = () => this.mergeSelectedStickerIntoBase();
+    document.getElementById("mc-obj-del").onclick = () => this.deleteSelected();
+    document.getElementById("mc-obj-merge").onclick = () => this.mergeSelectedStickerIntoBase();
 
     const stInput = document.getElementById("mc-sticker-input");
     stInput.onchange = (e) => { if (e.target.files?.[0]) this.addStickerFile(e.target.files[0]); stInput.value = ""; };
@@ -594,7 +744,7 @@ export class MeasureCanvas {
           document.getElementById("mc-stamp-drawer")?.classList.toggle("hidden");
           return;
         }
-        this.setTool(next, next === "PAN");
+        this.setTool(next);
       };
     });
 
@@ -611,12 +761,22 @@ export class MeasureCanvas {
     document.getElementById("mc-fit").onclick = () => { this.fitToScreen(); this.render(); this.positionInline(); };
     document.getElementById("mc-undo").onclick = () => this.undo();
     document.getElementById("mc-redo").onclick = () => this.redo();
+    document.getElementById("mc-export-img").onclick = () => this.exportAnnotatedImage();
+    document.getElementById("mc-browser-fs").onclick = () => {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+      else document.exitFullscreen().catch(() => {});
+    };
+
+    const prevBtn = document.getElementById("mc-side-prev");
+    const nextBtn = document.getElementById("mc-side-next");
+    if (prevBtn && this.navHooks.onPrev) prevBtn.onclick = this.navHooks.onPrev;
+    if (nextBtn && this.navHooks.onNext) nextBtn.onclick = this.navHooks.onNext;
   }
 
   fitToScreen() {
     const rect = this.viewport.getBoundingClientRect();
-    const vw = rect.width || 800, vh = rect.height || 500;
-    this.scale = Math.min(vw / this.natW, vh / this.natH) * 0.96;
+    const vw = rect.width || window.innerWidth, vh = rect.height || window.innerHeight;
+    this.scale = Math.min(vw / this.natW, vh / this.natH) * 0.97;
     this.offsetX = (vw - this.natW * this.scale) / 2;
     this.offsetY = (vh - this.natH * this.scale) / 2;
   }
@@ -661,24 +821,75 @@ export class MeasureCanvas {
 
   bindPointerEvents() {
     let isDown = false, startPt = null, lastPt = null, draftLine = null, draftPath = null, panStart = null, hasMoved = false, pushed = false;
-    let pinchDist = 0, pinchScale = 1;
+    let pinchDist = 0, pinchScale = 1, wasPinching = false;
+    let clickTimer = null;
     const ptrs = new Map();
+
+    // 雙擊連續線：若雙擊處已有切點且相鄰段未入數，則減分段合併；否則在雙擊處新增切點並入數
+    this.canvas.addEventListener("dblclick", (e) => {
+      if (this.tool !== "RULER" && this.tool !== "CHAIN" && this.tool !== "PAN") return;
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+      const imgPt = this.screenToImg(e.clientX, e.clientY);
+      const hit = this.hitTest(imgPt);
+      if (!hit || hit.type !== "line" || hit.part !== "body") return;
+
+      const l = this.lines[hit.idx];
+      if (!l) return;
+      if (!Array.isArray(l.splits)) l.splits = [];
+      if (!Array.isArray(l.segValues)) l.segValues = [];
+      const t = hit.t;
+      if (t <= 0.05 || t >= 0.95) return;
+
+      const nearSplitIdx = l.splits.findIndex(sp => Math.abs(sp - t) < 0.06);
+      this.pushHistory();
+      if (nearSplitIdx !== -1) {
+        const leftEmpty = !l.segValues[nearSplitIdx];
+        const rightEmpty = !l.segValues[nearSplitIdx + 1];
+        if (leftEmpty || rightEmpty) {
+          const keepVal = l.segValues[nearSplitIdx] || l.segValues[nearSplitIdx + 1] || "";
+          l.splits.splice(nearSplitIdx, 1);
+          l.segValues.splice(nearSplitIdx, 2, keepVal);
+          if (l.splits.length === 0) {
+            l.text = keepVal;
+            l.segValues = [];
+          } else {
+            const total = l.segValues.reduce((s, v) => s + (Number(v) || 0), 0);
+            l.text = total > 0 ? String(total) : "";
+          }
+          this.render();
+          this.triggerSave();
+          return;
+        }
+      }
+
+      if (l.splits.length === 0 && l.text) l.segValues = [String(l.text), ""];
+      else if (l.splits.length === 0) l.segValues = ["", ""];
+      l.splits.push(t);
+      l.splits.sort((a, b) => a - b);
+      const insIdx = l.splits.indexOf(t);
+      if (l.segValues.length < l.splits.length + 1) {
+        l.segValues.splice(insIdx + 1, 0, "");
+      }
+      this.render();
+      this.triggerSave();
+      this.openLineSegmentEditor(hit.idx, t + 0.01);
+    });
 
     this.canvas.addEventListener("pointerdown", (e) => {
       if (this.inlineState) { this.commitInline(true); return; }
-      const rect = this.viewport.getBoundingClientRect();
-      this.lastCursorPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       this.canvas.setPointerCapture(e.pointerId);
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-      if (ptrs.size === 2) {
+      if (ptrs.size >= 2) {
         const a = Array.from(ptrs.values());
         pinchDist = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
         pinchScale = this.scale;
-        draftLine = null; draftPath = null;
+        wasPinching = true;
+        draftLine = null; draftPath = null; isDown = false;
         return;
       }
 
+      wasPinching = false;
       isDown = true; hasMoved = false; pushed = false;
       const imgPt = this.screenToImg(e.clientX, e.clientY);
       startPt = imgPt; lastPt = imgPt;
@@ -686,14 +897,18 @@ export class MeasureCanvas {
       if (this.tool === "PAN") {
         const hit = this.hitTest(imgPt);
         this.selectedObj = hit;
-        if (hit) this.updateHUD(true);
-        else { panStart = { x: e.clientX - this.offsetX, y: e.clientY - this.offsetY }; this.updateHUD(false); }
+        this.updateObjectHUD();
+        if (!hit) panStart = { x: e.clientX - this.offsetX, y: e.clientY - this.offsetY };
         this.render();
       } else if (this.tool === "RULER" || this.tool === "CHAIN") {
         const hit = this.hitTest(imgPt);
         if (hit && hit.type === "line" && hit.part === "body") {
           isDown = false;
-          this.handleLineClick(hit.idx, hit.t);
+          if (clickTimer) clearTimeout(clickTimer);
+          clickTimer = setTimeout(() => {
+            clickTimer = null;
+            this.openLineSegmentEditor(hit.idx, hit.t);
+          }, 210);
           return;
         }
         draftLine = {
@@ -717,7 +932,7 @@ export class MeasureCanvas {
 
     this.canvas.addEventListener("pointermove", (e) => {
       if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (ptrs.size === 2) {
+      if (ptrs.size >= 2) {
         const a = Array.from(ptrs.values());
         const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
         if (pinchDist > 0) {
@@ -731,7 +946,7 @@ export class MeasureCanvas {
         }
         return;
       }
-      if (!isDown) return;
+      if (!isDown || wasPinching) return;
       const imgPt = this.screenToImg(e.clientX, e.clientY);
       const dx = imgPt.x - lastPt.x, dy = imgPt.y - lastPt.y;
       if (Math.hypot(imgPt.x - startPt.x, imgPt.y - startPt.y) > 3 / this.scale) hasMoved = true;
@@ -774,11 +989,17 @@ export class MeasureCanvas {
 
     const endPtr = (e) => {
       ptrs.delete(e.pointerId);
+      if (ptrs.size === 0 && wasPinching) {
+        wasPinching = false;
+        isDown = false;
+        return;
+      }
       if (this.tool === "PAN" && isDown && !hasMoved && this.selectedObj) {
         const { type, idx } = this.selectedObj;
         if (type === "line") {
           const proj = this.projectToSeg(startPt, this.lines[idx].x1, this.lines[idx].y1, this.lines[idx].x2, this.lines[idx].y2);
-          this.handleLineClick(idx, proj.t);
+          if (clickTimer) clearTimeout(clickTimer);
+          clickTimer = setTimeout(() => { clickTimer = null; this.openLineSegmentEditor(idx, proj.t); }, 210);
         } else if (type === "marker") {
           const m = this.markers[idx];
           this.startInline({ kind: "marker", markerIdx: idx, x: m.x, y: m.y, val: m.text || "", color: m.color });
@@ -791,7 +1012,7 @@ export class MeasureCanvas {
           this.lines.push(draftLine);
           const idx = this.lines.length - 1;
           this.render(); this.triggerSave();
-          this.handleLineClick(idx, 0.25);
+          this.openLineSegmentEditor(idx, 0.25);
         } else { this.render(); }
         draftLine = null;
       }
@@ -816,28 +1037,14 @@ export class MeasureCanvas {
     }, { passive: false });
   }
 
-  handleLineClick(lineIdx, t) {
+  openLineSegmentEditor(lineIdx, t) {
     const l = this.lines[lineIdx];
     if (!l) return;
-    if (!Array.isArray(l.splits)) l.splits = [];
-    if (!Array.isArray(l.segValues)) l.segValues = [];
-
-    if (this.tool === "CHAIN" && t > 0.06 && t < 0.94) {
-      const near = l.splits.findIndex(sp => Math.abs(sp - t) < 0.04);
-      this.pushHistory();
-      if (near !== -1) { l.splits.splice(near, 1); l.segValues.splice(near, 1); }
-      else {
-        if (l.splits.length === 0 && l.text) l.segValues = [String(l.text), ""];
-        l.splits.push(t); l.splits.sort((a, b) => a - b);
-        l.segValues.splice(l.splits.indexOf(t) + 1, 0, "");
-      }
-      this.render(); this.triggerSave();
-    }
-
-    const hasSplits = l.splits.length > 0;
-    let segIdx = hasSplits ? l.splits.findIndex(sp => t <= sp) : -1;
-    if (hasSplits && segIdx === -1) segIdx = l.splits.length;
-    const initVal = hasSplits ? String(l.segValues[segIdx] || "") : String(l.text || "");
+    const splits = Array.isArray(l.splits) ? l.splits : [];
+    const hasSplits = splits.length > 0;
+    let segIdx = hasSplits ? splits.findIndex(sp => t <= sp) : -1;
+    if (hasSplits && segIdx === -1) segIdx = splits.length;
+    const initVal = hasSplits ? String((l.segValues || [])[segIdx] || "") : String(l.text || "");
     this.startInline({ kind: "line", lineIdx, segIdx, val: initVal, color: l.color });
   }
 
@@ -857,37 +1064,37 @@ export class MeasureCanvas {
 
     ctx.drawImage(this.img, 0, 0, this.natW, this.natH);
 
+    const isPanMode = this.tool === "PAN";
+
     this.stickers.forEach((st, idx) => {
       const src = st.url || st.src || st.dataUrl;
       const im = src ? this.stickerCache.get(src) : null;
       if (im && im.complete) ctx.drawImage(im, st.x, st.y, st.w, st.h);
-      if (this.selectedObj?.type === "sticker" && this.selectedObj?.idx === idx) {
-        ctx.strokeStyle = "#2563EB";
-        ctx.lineWidth = 2 / this.scale;
-        ctx.strokeRect(st.x, st.y, st.w, st.h);
-        const hs = 9 / this.scale;
-        ctx.fillStyle = "#2563EB";
-        ctx.fillRect(st.x + st.w - hs / 2, st.y + st.h - hs / 2, hs, hs);
+      const isSel = this.selectedObj?.type === "sticker" && this.selectedObj?.idx === idx;
+      if (isPanMode || isSel) {
+        this.drawMoveBox(ctx, st.x, st.y, st.w, st.h, isSel, true);
       }
     });
 
     const allPaths = draftPath ? [...this.paths, draftPath] : this.paths;
     allPaths.forEach((p, idx) => {
-      const pts = p.points || [];
-      if (pts.length < 2) return;
       const isSel = this.selectedObj?.type === "path" && this.selectedObj?.idx === idx;
-      ctx.strokeStyle = isSel ? "#F59E0B" : (p.color || "#111827");
-      ctx.lineWidth = Math.max(1.3, (this.natW / 650) * (p.lineScale || this.lineFactor));
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      pts.forEach((n, i) => i === 0 ? ctx.moveTo(n.x, n.y) : ctx.lineTo(n.x, n.y));
-      ctx.stroke();
+      this.drawStrokePath(ctx, p, isSel);
+      if (isPanMode && (p.points || []).length > 1) {
+        const xs = p.points.map(n => n.x), ys = p.points.map(n => n.y);
+        const minX = Math.min(...xs) - 6, minY = Math.min(...ys) - 6;
+        this.drawMoveBox(ctx, minX, minY, Math.max(...xs) - minX + 6, Math.max(...ys) - minY + 6, isSel, false);
+      }
     });
 
     const allLines = draftLine ? [...this.lines, draftLine] : this.lines;
     allLines.forEach((l, idx) => {
       const isSel = this.selectedObj?.type === "line" && this.selectedObj?.idx === idx;
       this.drawRulerLine(ctx, l, isSel, idx);
+      if (isPanMode) {
+        const minX = Math.min(l.x1, l.x2) - 10, minY = Math.min(l.y1, l.y2) - 10;
+        this.drawMoveBox(ctx, minX, minY, Math.abs(l.x2 - l.x1) + 20, Math.abs(l.y2 - l.y1) + 20, isSel, false);
+      }
     });
 
     this.markers.forEach((m, idx) => {
@@ -895,57 +1102,127 @@ export class MeasureCanvas {
       const isSel = this.selectedObj?.type === "marker" && this.selectedObj?.idx === idx;
       const txt = m.text || "";
       if (!txt) return;
-      const fs = Math.max(10, Math.round((this.natW / 74) * (m.fontScale || this.fontFactor)));
-      this.drawTightText(ctx, txt, m.x, m.y, fs, isSel ? "#F59E0B" : (m.color || "#2563EB"), m.isStamp === true);
+      const fs = Math.max(11, Math.round((this.natW / 72) * (m.fontScale || this.fontFactor)));
+      const box = this.drawHaloText(ctx, txt, m.x, m.y, fs, isSel ? "#FACC15" : (m.color || "#EF4444"), m.isStamp === true);
+      if (isPanMode && box) {
+        this.drawMoveBox(ctx, box.x, box.y, box.w, box.h, isSel, false);
+      }
     });
 
     ctx.restore();
   }
 
-  drawTightText(ctx, text, x, y, fontSize, color, filled) {
+  // 移動模式顯示可移動物件外框
+  drawMoveBox(ctx, x, y, w, h, isSelected, showResizeHandle) {
     ctx.save();
-    ctx.font = `700 ${fontSize}px -apple-system, sans-serif`;
-    const mw = ctx.measureText(text).width;
-    const bw = mw + Math.max(4, fontSize * 0.32), bh = fontSize * 1.18;
-    ctx.fillStyle = filled ? color : "rgba(255,255,255,0.95)";
-    ctx.fillRect(x - bw / 2, y - bh / 2, bw, bh);
-    ctx.fillStyle = filled ? "#FFF" : color;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(text, x, y + 0.5);
+    ctx.strokeStyle = isSelected ? "#FACC15" : "rgba(56, 189, 248, 0.78)";
+    ctx.lineWidth = (isSelected ? 2.2 : 1.3) / this.scale;
+    if (!isSelected) ctx.setLineDash([5 / this.scale, 4 / this.scale]);
+    ctx.strokeRect(x, y, w, h);
+    if (isSelected && showResizeHandle) {
+      const hs = 9 / this.scale;
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#FACC15";
+      ctx.fillRect(x + w - hs / 2, y + h - hs / 2, hs, hs);
+    }
     ctx.restore();
   }
 
+  drawStrokePath(ctx, p, isSel) {
+    const pts = p.points || [];
+    if (pts.length < 2) return;
+    const col = isSel ? "#FACC15" : (p.color || "#EF4444");
+    const lw = Math.max(1.5, (this.natW / 620) * (p.lineScale || this.lineFactor));
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.strokeStyle = (col === "#1E293B") ? "rgba(255,255,255,0.88)" : "rgba(0,0,0,0.68)";
+    ctx.lineWidth = lw + 1.8;
+    ctx.beginPath();
+    pts.forEach((n, i) => i === 0 ? ctx.moveTo(n.x, n.y) : ctx.lineTo(n.x, n.y));
+    ctx.stroke();
+
+    ctx.strokeStyle = col;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    pts.forEach((n, i) => i === 0 ? ctx.moveTo(n.x, n.y) : ctx.lineTo(n.x, n.y));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 透明底＋極細反差描邊字（完全不遮擋底圖原有文字與線條）
+  drawHaloText(ctx, text, x, y, fontSize, color, filled) {
+    ctx.save();
+    ctx.font = `800 ${fontSize}px -apple-system, sans-serif`;
+    const mw = ctx.measureText(text).width;
+    const bw = mw + Math.max(6, fontSize * 0.35), bh = fontSize * 1.22;
+
+    if (filled) {
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "rgba(0,0,0,0.65)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.roundRect(x - bw / 2, y - bh / 2, bw, bh, 4); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = (color === "#FACC15" || color === "#FFFFFF") ? "#111827" : "#FFFFFF";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(text, x, y + 0.5);
+    } else {
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      const isLightInk = (color === "#FACC15" || color === "#FFFFFF" || color === "#F97316");
+      ctx.strokeStyle = isLightInk ? "rgba(15, 23, 42, 0.92)" : "rgba(255, 255, 255, 0.94)";
+      ctx.lineWidth = Math.max(2.6, fontSize * 0.22);
+      ctx.strokeText(text, x, y + 0.5);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y + 0.5);
+    }
+    ctx.restore();
+    return { x: x - bw / 2, y: y - bh / 2, w: bw, h: bh };
+  }
+
   drawRulerLine(ctx, l, isSel, idx) {
-    const color = l.color || "#2563EB";
-    const lw = Math.max(1.2, (this.natW / 760) * (l.lineScale || this.lineFactor));
-    const headLen = lw * 3.1;
+    const color = isSel ? "#FACC15" : (l.color || "#EF4444");
+    const lw = Math.max(1.4, (this.natW / 720) * (l.lineScale || this.lineFactor));
+    const headLen = lw * 3.2;
     const angle = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
-    const fs = Math.max(10, Math.round((this.natW / 74) * (l.fontScale || this.fontFactor)));
+    const fs = Math.max(11, Math.round((this.natW / 72) * (l.fontScale || this.fontFactor)));
     const editing = this.inlineState?.kind === "line" && this.inlineState?.lineIdx === idx;
 
-    ctx.save();
-    ctx.strokeStyle = isSel ? "#F59E0B" : color;
-    ctx.lineWidth = lw;
-    ctx.beginPath(); ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2); ctx.stroke();
-
-    const endMark = (x, y, ang) => {
-      ctx.beginPath();
-      ctx.moveTo(x, y); ctx.lineTo(x + headLen * Math.cos(ang + 0.38), y + headLen * Math.sin(ang + 0.38));
-      ctx.moveTo(x, y); ctx.lineTo(x + headLen * Math.cos(ang - 0.38), y + headLen * Math.sin(ang - 0.38));
-      ctx.stroke();
+    const strokeWithHalo = (drawFn) => {
+      ctx.strokeStyle = color === "#1E293B" ? "rgba(255,255,255,0.88)" : "rgba(0,0,0,0.68)";
+      ctx.lineWidth = lw + 1.8;
+      drawFn();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      drawFn();
     };
-    endMark(l.x1, l.y1, angle);
-    endMark(l.x2, l.y2, angle + Math.PI);
+
+    ctx.save();
+    strokeWithHalo(() => {
+      ctx.beginPath();
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x2, l.y2);
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x1 + headLen * Math.cos(angle + 0.38), l.y1 + headLen * Math.sin(angle + 0.38));
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x1 + headLen * Math.cos(angle - 0.38), l.y1 + headLen * Math.sin(angle - 0.38));
+      ctx.moveTo(l.x2, l.y2);
+      ctx.lineTo(l.x2 + headLen * Math.cos(angle + Math.PI + 0.38), l.y2 + headLen * Math.sin(angle + Math.PI + 0.38));
+      ctx.moveTo(l.x2, l.y2);
+      ctx.lineTo(l.x2 + headLen * Math.cos(angle + Math.PI - 0.38), l.y2 + headLen * Math.sin(angle + Math.PI - 0.38));
+      ctx.stroke();
+    });
 
     const splits = Array.isArray(l.splits) ? l.splits : [];
     if (splits.length > 0) {
-      splits.forEach(t => {
-        const sx = l.x1 + (l.x2 - l.x1) * t, sy = l.y1 + (l.y2 - l.y1) * t;
+      strokeWithHalo(() => {
         ctx.beginPath();
-        ctx.moveTo(sx - headLen * Math.cos(angle + 1.05), sy - headLen * Math.sin(angle + 1.05));
-        ctx.lineTo(sx + headLen * Math.cos(angle + 1.05), sy + headLen * Math.sin(angle + 1.05));
+        splits.forEach(t => {
+          const sx = l.x1 + (l.x2 - l.x1) * t, sy = l.y1 + (l.y2 - l.y1) * t;
+          ctx.moveTo(sx - headLen * Math.cos(angle + 1.05), sy - headLen * Math.sin(angle + 1.05));
+          ctx.lineTo(sx + headLen * Math.cos(angle + 1.05), sy + headLen * Math.sin(angle + 1.05));
+        });
         ctx.stroke();
       });
+
       const ptsT = [0, ...splits, 1];
       const segVals = l.segValues || [];
       let total = 0;
@@ -953,13 +1230,14 @@ export class MeasureCanvas {
         total += Number(segVals[i]) || 0;
         if (editing && this.inlineState?.segIdx === i) continue;
         const midT = (ptsT[i] + ptsT[i + 1]) / 2;
-        this.drawTightText(ctx, segVals[i] ? String(segVals[i]) : "·", l.x1 + (l.x2 - l.x1) * midT, l.y1 + (l.y2 - l.y1) * midT, fs, color, false);
+        const valText = segVals[i] ? String(segVals[i]) : "?";
+        this.drawHaloText(ctx, valText, l.x1 + (l.x2 - l.x1) * midT, l.y1 + (l.y2 - l.y1) * midT, fs, color, false);
       }
       if (total > 0) {
-        this.drawTightText(ctx, `總:${total}`, (l.x1 + l.x2) / 2 + Math.sin(angle) * fs * 1.15, (l.y1 + l.y2) / 2 - Math.cos(angle) * fs * 1.15, Math.round(fs * 0.92), color, false);
+        this.drawHaloText(ctx, `總:${total}`, (l.x1 + l.x2) / 2 + Math.sin(angle) * fs * 1.25, (l.y1 + l.y2) / 2 - Math.cos(angle) * fs * 1.25, Math.round(fs * 0.92), color, false);
       }
     } else if (!editing && l.text) {
-      this.drawTightText(ctx, String(l.text), (l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2, fs, color, false);
+      this.drawHaloText(ctx, String(l.text), (l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2, fs, color, false);
     }
     ctx.restore();
   }
