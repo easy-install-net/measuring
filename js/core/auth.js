@@ -1,65 +1,67 @@
 import {
-  signInWithEmailAndPassword,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
   onAuthStateChanged,
-  signOut
+  setPersistence,
+  browserLocalPersistence
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { auth } from "../config/firebase-init.js";
 
 export function checkBrowserCompatibility() {
-  const ua = navigator.userAgent || "";
-  const isInApp = /GSA\/|WhatsApp|FBAN|FBAV|Line/i.test(ua);
-  const banner = document.getElementById("webview-banner");
-  if (banner && isInApp) {
-    banner.classList.remove("hidden");
+  if (!window.indexedDB || !window.fetch) {
+    alert("請使用最新版的 Chrome 或 Safari 瀏覽器以確保完整功能。");
   }
 }
 
-export function renderLoginView(container, onSuccess) {
-  container.innerHTML = `
-    <div class="card" style="max-width: 400px; margin: 40px auto;">
-      <h2 style="margin-top:0; font-size:18px;">MEASURING 系統登入</h2>
-      <p style="color:#4B5563; font-size:13px;">支援手機與電腦多端同步，登入後自動保持連線。</p>
-      <form id="login-form" style="display:flex; flex-direction:column; gap:10px;">
-        <input type="email" id="login-email" placeholder="電郵地址" required
-               style="padding:10px; border:1px solid #111827; border-radius:4px; font-size:15px;" />
-        <input type="password" id="login-pass" placeholder="密碼" required
-               style="padding:10px; border:1px solid #111827; border-radius:4px; font-size:15px;" />
-        <button type="submit" class="btn-solid" style="padding:10px;">進入工程系統</button>
-        <div id="login-error" style="color:#DC2626; font-size:13px;"></div>
-      </form>
-    </div>
-  `;
-
-  document.getElementById("login-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const email = document.getElementById("login-email").value.trim();
-    const pass = document.getElementById("login-pass").value;
-    const errBox = document.getElementById("login-error");
-    errBox.textContent = "驗證中...";
-    try {
-      await signInWithEmailAndPassword(auth, email, pass);
-      if (onSuccess) onSuccess();
-    } catch (err) {
-      errBox.textContent = "登入失敗，請檢查電郵或密碼。";
-    }
-  });
-}
-
 export function watchAuth(onLoggedIn, onLoggedOut) {
+  const statusBtn = document.getElementById("auth-status-btn");
+  setPersistence(auth, browserLocalPersistence).catch(() => {});
+
   onAuthStateChanged(auth, (user) => {
-    const authBtn = document.getElementById("btn-auth-action");
     if (user) {
-      if (authBtn) {
-        authBtn.textContent = "登出";
-        authBtn.onclick = () => signOut(auth);
+      if (statusBtn) {
+        statusBtn.textContent = "登出";
+        statusBtn.onclick = () => signOut(auth);
       }
       onLoggedIn(user);
     } else {
-      if (authBtn) {
-        authBtn.textContent = "未登入";
-        authBtn.onclick = null;
+      if (statusBtn) {
+        statusBtn.textContent = "未登入";
+        statusBtn.onclick = null;
       }
       onLoggedOut();
     }
   });
+}
+
+export function renderLoginView(root) {
+  root.innerHTML = `
+    <div class="card" style="max-width:400px; margin:40px auto; text-align:center; padding:28px 20px;">
+      <div style="font-size:20px; font-weight:700; margin-bottom:8px;">MEASURING 系統登入</div>
+      <div style="font-size:13px; color:#6B7280; margin-bottom:22px;">
+        使用與舊系統相同的 Google 帳號一鍵登入，自動保持連線。
+      </div>
+      <button id="btn-google-login" class="btn-solid" style="width:100%; padding:12px; font-size:15px; display:flex; align-items:center; justify-content:center; gap:8px;">
+        <span>G</span>
+        <span>使用 Google 帳號一鍵登入</span>
+      </button>
+      <div id="login-err-msg" style="color:#DC2626; font-size:12px; margin-top:12px;"></div>
+    </div>
+  `;
+
+  document.getElementById("btn-google-login").onclick = async () => {
+    const btn = document.getElementById("btn-google-login");
+    const errEl = document.getElementById("login-err-msg");
+    btn.disabled = true;
+    errEl.textContent = "";
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await signInWithPopup(auth, provider);
+    } catch (e) {
+      btn.disabled = false;
+      errEl.textContent = "登入失敗：" + (e.message || e.code);
+    }
+  };
 }
