@@ -31,6 +31,17 @@ const DOC_TYPE_LABELS = {
 
 const DOC_TYPE_RANK = { plan: 1, photo: 2, "3d": 3, dim: 4, detail: 5, render: 6 };
 
+// 空間分區撞色主題（讓不同空間在展開模式下界線分明、一眼看清）
+const ZONE_THEMES = [
+  { bg: "#FFFBEB", border: "#F59E0B", headerBg: "#FEF3C7", text: "#78350F", badgeBg: "#FDE68A" }, // 琥珀黃
+  { bg: "#F0F9FF", border: "#0284C7", headerBg: "#E0F2FE", text: "#0C4A6E", badgeBg: "#BAE6FD" }, // 天空藍
+  { bg: "#ECFDF5", border: "#059669", headerBg: "#D1FAE5", text: "#064E3B", badgeBg: "#A7F3D0" }, // 翡翠綠
+  { bg: "#FFF1F2", border: "#E11D48", headerBg: "#FFE4E6", text: "#881337", badgeBg: "#FECDD3" }, // 玫瑰紅
+  { bg: "#EEF2FF", border: "#4F46E5", headerBg: "#E0E7FF", text: "#312E81", badgeBg: "#C7D2FE" }  // 靛藍色
+];
+const MASTER_ZONE_THEME = { bg: "#FAF5FF", border: "#9333EA", headerBg: "#F3E8FF", text: "#581C87", badgeBg: "#E9D5FF" };
+const UNASSIGNED_ZONE_THEME = { bg: "#F8FAFC", border: "#64748B", headerBg: "#E2E8F0", text: "#1E293B", badgeBg: "#CBD5E1" };
+
 checkBrowserCompatibility();
 
 watchAuth(async () => {
@@ -416,7 +427,7 @@ function renderOverview() {
       </div>
     </div>
 
-    <div class="card" style="padding:10px; margin-bottom:10px;">
+    <div class="card" style="padding:10px; margin-bottom:12px;">
       <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #E5E7EB;">
         <span style="font-size:12px; color:#6B7280; margin-right:2px;">${filteredPages.length}/${pages.length}頁</span>
         <button id="btn-mode-folder" class="chip ${viewMode === "FOLDER" ? "active" : ""}">🗂️ 圖集</button>
@@ -487,7 +498,7 @@ function renderOverview() {
 
 function renderFolderGrid(host, sortedGroups, allPages) {
   host.innerHTML = `
-    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px;">
+    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:14px;">
       ${sortedGroups.map(([spaceName, items]) => {
         const activeSubIdx = Math.min(folderCoverIndex[spaceName] || 0, items.length - 1);
         const coverPage = items[activeSubIdx];
@@ -496,10 +507,10 @@ function renderFolderGrid(host, sortedGroups, allPages) {
         const extraCount = items.length - 4;
 
         return `
-          <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+          <div style="background:#FFF; border:1.5px solid #CBD5E1; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 1px 3px rgba(0,0,0,0.06);">
             <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#F8FAFC; border-bottom:1px solid #E2E8F0;">
               <strong style="font-size:15px; color:#1E293B;">${spaceName}</strong>
-              <span style="font-size:12px; color:#64748B;">${items.length}張</span>
+              <span style="font-size:12px; font-weight:700; color:#475569; background:#E2E8F0; padding:1px 7px; border-radius:10px;">${items.length}張</span>
             </div>
 
             <div style="padding:4px 12px 0 12px; font-size:12px; color:#64748B;">
@@ -526,7 +537,7 @@ function renderFolderGrid(host, sortedGroups, allPages) {
                 ${extraCount > 0 ? `<span style="font-size:12px; color:#64748B; margin-left:2px;">+${extraCount}</span>` : ""}
               </div>
               <button class="folder-expand-btn" data-expand-space="${spaceName}"
-                      style="background:none; border:none; color:#4F46E5; font-size:12px; font-weight:600; cursor:pointer; padding:4px;">
+                      style="background:none; border:none; color:#4F46E5; font-size:12px; font-weight:700; cursor:pointer; padding:4px;">
                 展開 ›
               </button>
             </div>
@@ -561,53 +572,66 @@ function renderFolderGrid(host, sortedGroups, allPages) {
   });
 }
 
+// 強化版分區展開視圖：高對比撞色橫幅 + 2px 粗邊框 + 22px 獨立區塊間距
 function renderExpandedSections(host, sortedGroups, allPages) {
   host.innerHTML = `
-    <div style="display:flex; flex-direction:column; gap:14px;">
-      ${sortedGroups.map(([spaceName, items]) => `
-        <div style="background:#F8FAFC; border:1.5px solid #CBD5E1; border-radius:8px; padding:12px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-            <div style="font-weight:700; font-size:15px; color:#1E293B;">
-              📁 ${spaceName} <span style="font-weight:400; color:#64748B; font-size:13px;">(${items.length} 頁)</span>
-            </div>
-            ${filterSpace !== "ALL"
-              ? `<button class="btn-outline btn-sm btn-back-all-folders">‹ 返回全部圖集</button>`
-              : `<span style="font-size:11px; color:#64748B; background:#E2E8F0; padding:2px 8px; border-radius:4px;">獨立空間分區</span>`}
-          </div>
+    <div style="display:flex; flex-direction:column; gap:22px;">
+      ${sortedGroups.map(([spaceName, items], groupIdx) => {
+        const theme = spaceName === "總圖"
+          ? MASTER_ZONE_THEME
+          : (spaceName === "未標空間" ? UNASSIGNED_ZONE_THEME : ZONE_THEMES[groupIdx % ZONE_THEMES.length]);
 
-          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:10px;">
-            ${items.map(p => {
-              const realIdx = allPages.indexOf(p);
-              const pNum = p.pageNum || `P${realIdx + 1}`;
-              const tLbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
-              const count = (p.lines || []).length + (p.markers || []).length;
-              const shortDate = (p.date || "").slice(5);
-              return `
-                <div class="page-grid-card" data-open-idx="${realIdx}"
-                     style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; overflow:hidden; cursor:pointer; display:flex; flex-direction:column;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-bottom:1px solid #F1F5F9; font-size:12px;">
-                    <span style="font-weight:700; color:#2563EB; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                      ${pNum} ${p.space || spaceName} · ${tLbl}
-                    </span>
-                    <span style="background:#111827; color:#FFF; padding:1px 6px; border-radius:3px; font-size:11px;">度尺</span>
+        return `
+          <div style="background:${theme.bg}; border:2px solid ${theme.border}; border-radius:10px; overflow:hidden; box-shadow:0 3px 8px rgba(0,0,0,0.06);">
+            <!-- 醒目分區標題橫幅 -->
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:${theme.headerBg}; border-bottom:2px solid ${theme.border};">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:17px;">📁</span>
+                <strong style="font-size:16px; color:${theme.text}; letter-spacing:0.3px;">${spaceName}</strong>
+                <span style="background:${theme.badgeBg}; color:${theme.text}; font-weight:700; font-size:12px; padding:2px 8px; border-radius:12px;">
+                  共 ${items.length} 頁
+                </span>
+              </div>
+              ${filterSpace !== "ALL"
+                ? `<button class="btn-outline btn-sm btn-back-all-folders" style="background:#FFF;">‹ 返回全部圖集</button>`
+                : `<span style="font-size:11px; font-weight:700; color:${theme.text}; background:rgba(255,255,255,0.75); padding:3px 9px; border-radius:4px; border:1px solid ${theme.border};">獨立空間分區</span>`}
+            </div>
+
+            <!-- 區內圖紙網格 -->
+            <div style="padding:12px; display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px;">
+              ${items.map(p => {
+                const realIdx = allPages.indexOf(p);
+                const pNum = p.pageNum || `P${realIdx + 1}`;
+                const tLbl = p.docTypeLabel || DOC_TYPE_LABELS[p.docType] || "拍攝";
+                const count = (p.lines || []).length + (p.markers || []).length;
+                const shortDate = (p.date || "").slice(5);
+                return `
+                  <div class="page-grid-card" data-open-idx="${realIdx}"
+                       style="background:#FFF; border:1.5px solid #CBD5E1; border-radius:6px; overflow:hidden; cursor:pointer; display:flex; flex-direction:column; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-bottom:1px solid #F1F5F9; font-size:12px; background:#FFFFFF;">
+                      <span style="font-weight:700; color:#1D4ED8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        ${pNum} ${p.space || spaceName} · ${tLbl}
+                      </span>
+                      <span style="background:#111827; color:#FFF; padding:1px 6px; border-radius:3px; font-size:11px;">度尺</span>
+                    </div>
+                    <div style="position:relative; height:155px; background:#F8FAFC; display:flex; align-items:center; justify-content:center;">
+                      ${p.sitePhotoUrl
+                        ? `<img src="${p.sitePhotoUrl}" style="width:100%; height:100%; object-fit:contain;" />`
+                        : `<span style="color:#94A3B8; font-size:12px;">尚未上傳圖紙</span>`}
+                      ${count > 0
+                        ? `<span style="position:absolute; top:6px; right:6px; background:#1E293B; color:#FFF; font-size:11px; padding:2px 6px; border-radius:4px;">📐 ${count}標註</span>`
+                        : ""}
+                      ${(shortDate || p.author)
+                        ? `<span style="position:absolute; bottom:6px; right:6px; background:rgba(255,255,255,0.92); color:#475569; font-size:11px; padding:1px 6px; border-radius:3px; border:1px solid #CBD5E1;">${shortDate} ${p.author || ""}</span>`
+                        : ""}
+                    </div>
                   </div>
-                  <div style="position:relative; height:155px; background:#F1F5F9; display:flex; align-items:center; justify-content:center;">
-                    ${p.sitePhotoUrl
-                      ? `<img src="${p.sitePhotoUrl}" style="width:100%; height:100%; object-fit:contain;" />`
-                      : `<span style="color:#94A3B8; font-size:12px;">尚未上傳圖紙</span>`}
-                    ${count > 0
-                      ? `<span style="position:absolute; top:6px; right:6px; background:#1E293B; color:#FFF; font-size:11px; padding:2px 6px; border-radius:4px;">📐 ${count}標註</span>`
-                      : ""}
-                    ${(shortDate || p.author)
-                      ? `<span style="position:absolute; bottom:6px; right:6px; background:rgba(255,255,255,0.9); color:#475569; font-size:11px; padding:1px 6px; border-radius:3px; border:1px solid #E2E8F0;">${shortDate} ${p.author || ""}</span>`
-                      : ""}
-                  </div>
-                </div>
-              `;
-            }).join("")}
+                `;
+              }).join("")}
+            </div>
           </div>
-        </div>
-      `).join("")}
+        `;
+      }).join("")}
     </div>
   `;
 
