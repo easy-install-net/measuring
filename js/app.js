@@ -18,7 +18,6 @@ let viewMode = "FOLDER";
 let filterSpace = "ALL";
 let filterDocType = "ALL";
 let filterReviewOnly = false;
-let showHiddenProjects = false;
 let folderCoverIndex = {};
 let activeCanvasInstance = null;
 const memoryPhotoCache = new Map();
@@ -65,7 +64,6 @@ function countProjectAnnotations(proj) {
   return total;
 }
 
-// 防止瀏覽器「上一頁」返回手勢意外跳離網站
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -121,9 +119,7 @@ async function renderProjectList() {
 
   const allUniqueProjects = Array.from(dedupMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const hiddenSet = getHiddenIds();
-  const visibleProjects = showHiddenProjects
-    ? allUniqueProjects
-    : allUniqueProjects.filter(p => !hiddenSet.has(p.id));
+  const visibleProjects = allUniqueProjects.filter(p => !hiddenSet.has(p.id));
   const hiddenCount = allUniqueProjects.filter(p => hiddenSet.has(p.id)).length;
 
   root.innerHTML = `
@@ -131,14 +127,42 @@ async function renderProjectList() {
       <input type="text" id="new-proj-name" placeholder="輸入新工程名稱"
              style="flex:1; min-width:180px; padding:6px 8px; border:1px solid #111827; border-radius:4px; font-size:14px;" />
       <button id="btn-create-proj" class="btn-solid">+ 建立工程</button>
+      <button id="btn-load-cloud-proj" class="btn-outline" style="color:#1D4ED8; border-color:#93C5FD; font-weight:700;">
+        📂 Load 工程 (${allUniqueProjects.length}${hiddenCount > 0 ? ` · 含${hiddenCount}已移除` : ""})
+      </button>
       <button id="btn-db-cleaner" class="btn-outline" style="color:#475569;">🧹 資料庫清理</button>
-      ${hiddenCount > 0 ? `
-        <button id="btn-toggle-hidden" class="btn-outline btn-sm" style="color:#6B7280;">
-          ${showHiddenProjects ? "隱藏已移除項目" : `顯示已移除 (${hiddenCount})`}
-        </button>
-      ` : ""}
     </div>
 
+    <!-- 雲端全部工程庫面板（Load 工程） -->
+    <div id="load-cloud-box" class="card hidden" style="background:#EFF6FF; border:1.5px solid #3B82F6;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <strong style="font-size:13px; color:#1E3A8A;">📂 雲端工程庫（全部 ${allUniqueProjects.length} 個工程 · 可載入或恢復至本機清單）</strong>
+        <button id="btn-close-load-box" class="btn-outline btn-sm">關閉</button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:5px; max-height:320px; overflow-y:auto;">
+        ${allUniqueProjects.map(p => {
+          const isHidden = hiddenSet.has(p.id);
+          const annCnt = countProjectAnnotations(p);
+          return `
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 9px; background:#FFF; border:1px solid ${isHidden ? "#CBD5E1" : "#BFDBFE"}; border-radius:6px;">
+              <div style="flex:1;">
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                  <strong style="font-size:13px; color:#0F172A;">${p.name}</strong>
+                  ${isHidden ? `<span style="font-size:10px; background:#F1F5F9; color:#64748B; padding:1px 5px; border-radius:4px; border:1px solid #CBD5E1;">已從本機清單移除</span>` : `<span style="font-size:10px; background:#DBEAFE; color:#1D4ED8; padding:1px 5px; border-radius:4px;">顯示中</span>`}
+                </div>
+                <div style="font-size:11px; color:#64748B;">ID：${p.id} · 共 ${(p.pages || []).length} 頁 · 📐 ${annCnt} 處標註</div>
+              </div>
+              <div style="display:flex; gap:5px;">
+                ${isHidden ? `<button class="btn-outline btn-sm cloud-restore-btn" data-cid="${p.id}" style="color:#059669; border-color:#6EE7B7;">↩ 放回清單</button>` : ""}
+                <button class="btn-solid btn-sm cloud-open-btn" data-cid="${p.id}">載入開啟</button>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+
+    <!-- 後台資料庫清潔面板（支援查看明細與逐項勾選） -->
     <div id="db-cleaner-box" class="card hidden" style="background:#F8FAFC; border:1.5px solid #475569;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
         <strong style="font-size:13px; color:#0F172A;">🧹 後台資料庫清潔（重複副本 / 零碎空工程 / 孤兒底圖）</strong>
@@ -149,30 +173,26 @@ async function renderProjectList() {
 
     <div id="proj-cards">
       ${visibleProjects.map(p => {
-        const isHidden = hiddenSet.has(p.id);
         const pendingReviews = (p.pages || []).reduce((acc, pg) => {
           const list = Array.isArray(pg.reviewLogs) ? pg.reviewLogs : [];
           return acc + list.filter(r => r.status === "PENDING").length;
         }, 0);
         return `
-          <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px; ${isHidden ? "opacity:0.6; background:#F8FAFC;" : ""}">
+          <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
             <div style="flex:1; cursor:pointer;" data-id="${p.id}">
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <strong style="font-size:15px;">${p.name}</strong>
-                ${isHidden ? `<span style="font-size:11px; background:#E2E8F0; color:#475569; padding:1px 6px; border-radius:4px;">已從本機移除</span>` : ""}
                 ${pendingReviews > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#DC2626; font-weight:700; padding:1px 6px; border-radius:4px;">🔴 ${pendingReviews}項待改</span>` : ""}
               </div>
               <div style="font-size:12px; color:#6B7280;">共 ${(p.pages || []).length} 頁圖紙</div>
             </div>
             <div style="display:flex; gap:6px; align-items:center;">
-              ${isHidden
-                ? `<button class="btn-outline btn-sm" style="color:#059669; border-color:#6EE7B7;" data-restore-id="${p.id}">↩ 恢復顯示</button>`
-                : `<button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;" data-hide-id="${p.id}">📦 從本機清單移除</button>`}
+              <button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;" data-hide-id="${p.id}">📦 從本機清單移除</button>
               <button class="btn-outline btn-sm" data-id="${p.id}">進入空間圖集 →</button>
             </div>
           </div>
         `;
-      }).join("") || `<div class="card" style="color:#6B7280;">目前清單沒有顯示中的工程，請在上方輸入名稱建立。</div>`}
+      }).join("") || `<div class="card" style="color:#6B7280;">目前本機清單沒有顯示中的工程，可點擊上方「📂 Load 工程」載入雲端工程或建立新工程。</div>`}
     </div>
   `;
 
@@ -185,13 +205,31 @@ async function renderProjectList() {
     openProject(newProj);
   };
 
-  const toggleHiddenBtn = document.getElementById("btn-toggle-hidden");
-  if (toggleHiddenBtn) {
-    toggleHiddenBtn.onclick = () => {
-      showHiddenProjects = !showHiddenProjects;
+  document.getElementById("btn-load-cloud-proj").onclick = () => {
+    document.getElementById("load-cloud-box").classList.toggle("hidden");
+  };
+  document.getElementById("btn-close-load-box").onclick = () => {
+    document.getElementById("load-cloud-box").classList.add("hidden");
+  };
+
+  root.querySelectorAll(".cloud-restore-btn").forEach(btn => {
+    btn.onclick = () => {
+      const s = getHiddenIds();
+      s.delete(btn.dataset.cid);
+      saveHiddenIds(s);
       renderProjectList();
     };
-  }
+  });
+
+  root.querySelectorAll(".cloud-open-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const s = getHiddenIds();
+      s.delete(btn.dataset.cid);
+      saveHiddenIds(s);
+      const found = allUniqueProjects.find(p => p.id === btn.dataset.cid);
+      if (found) await openProjectWithHydration(found);
+    };
+  });
 
   document.getElementById("btn-db-cleaner").onclick = () => openDatabaseCleaner(rawProjects);
   document.getElementById("btn-close-cleaner").onclick = () => {
@@ -203,16 +241,6 @@ async function renderProjectList() {
       e.stopPropagation();
       const s = getHiddenIds();
       s.add(btn.dataset.hideId);
-      saveHiddenIds(s);
-      renderProjectList();
-    };
-  });
-
-  root.querySelectorAll("[data-restore-id]").forEach(btn => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const s = getHiddenIds();
-      s.delete(btn.dataset.restoreId);
       saveHiddenIds(s);
       renderProjectList();
     };
@@ -230,12 +258,12 @@ async function openDatabaseCleaner(rawProjects) {
   const box = document.getElementById("db-cleaner-box");
   const body = document.getElementById("cleaner-body");
   box.classList.remove("hidden");
-  body.innerHTML = `正在掃描重複工程、零碎空檔與孤兒圖片...`;
+  body.innerHTML = `正在掃描重複工程、零碎空檔與孤兒圖片明細...`;
 
   try {
     const mediaSnap = await getDocs(collection(db, MEDIA_COL));
-    const allMediaIds = [];
-    mediaSnap.forEach(d => allMediaIds.push(d.id));
+    const allMediaDocs = [];
+    mediaSnap.forEach(d => allMediaDocs.push({ id: d.id, ...d.data() }));
 
     // 1. 找出重複工程副本
     const groups = new Map();
@@ -250,10 +278,10 @@ async function openDatabaseCleaner(rawProjects) {
     groups.forEach(list => {
       list.sort((a, b) => (countProjectAnnotations(b) * 1000000 + (b.updatedAt || 0)) - (countProjectAnnotations(a) * 1000000 + (a.updatedAt || 0)));
       keptProjs.push(list[0]);
-      for (let i = 1; i < list.length; i++) duplicateProjs.push(list[i]);
+      for (let i = 1; i < list.length; i++) duplicateProjs.push({ ...list[i], _keptName: list[0].name, _keptId: list[0].id });
     });
 
-    // 2. 找出零碎空工程（0頁或完全無底圖無標註）
+    // 2. 找出零碎空工程
     const emptyProjs = keptProjs.filter(p => {
       const pages = p.pages || [];
       if (pages.length === 0) return true;
@@ -268,41 +296,116 @@ async function openDatabaseCleaner(rawProjects) {
         if (pg.mediaRefId) validMediaSet.add(String(pg.mediaRefId));
       });
     });
-    const orphanMediaIds = allMediaIds.filter(id => !validMediaSet.has(String(id)));
+    const orphanMediaDocs = allMediaDocs.filter(m => !validMediaSet.has(String(m.id)));
 
-    if (!duplicateProjs.length && !emptyProjs.length && !orphanMediaIds.length) {
+    if (!duplicateProjs.length && !emptyProjs.length && !orphanMediaDocs.length) {
       body.innerHTML = `<div style="color:#059669; font-weight:700; padding:6px 0;">✅ 資料庫非常乾淨，沒有重複工程、零碎空檔或孤兒圖片！</div>`;
       return;
     }
 
     body.innerHTML = `
-      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
-        <div>• 重複多餘工程副本：<strong>${duplicateProjs.length}</strong> 筆（將保留標註最多的一份）</div>
-        <div>• 零碎無內容空工程：<strong>${emptyProjs.length}</strong> 筆</div>
-        <div>• 無人引用的孤兒圖片：<strong>${orphanMediaIds.length}</strong> 張</div>
+      <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
+        <!-- 類別 1：重複多餘工程副本 -->
+        <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span>• 重複多餘工程副本：<strong>${duplicateProjs.length}</strong> 筆（保留標註最多的一份）</span>
+            ${duplicateProjs.length > 0 ? `<button type="button" class="btn-outline btn-sm cl-toggle-detail" data-target="cl-dup-list">👁️ 查看明細</button>` : ""}
+          </div>
+          <div id="cl-dup-list" class="hidden" style="margin-top:6px; padding-top:6px; border-top:1px dashed #E2E8F0; display:flex; flex-direction:column; gap:4px; max-height:160px; overflow-y:auto;">
+            ${duplicateProjs.map(dp => `
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:#334155;">
+                <input type="checkbox" class="cl-chk-proj" value="${dp.id}" checked />
+                <span><strong>${dp.name}</strong> (ID: ${dp.id} · ${(dp.pages || []).length}頁 · ${countProjectAnnotations(dp)}標註)</span>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+
+        <!-- 類別 2：零碎無內容空工程 -->
+        <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span>• 零碎無內容空工程：<strong>${emptyProjs.length}</strong> 筆</span>
+            ${emptyProjs.length > 0 ? `<button type="button" class="btn-outline btn-sm cl-toggle-detail" data-target="cl-empty-list">👁️ 查看明細</button>` : ""}
+          </div>
+          <div id="cl-empty-list" class="hidden" style="margin-top:6px; padding-top:6px; border-top:1px dashed #E2E8F0; display:flex; flex-direction:column; gap:4px; max-height:160px; overflow-y:auto;">
+            ${emptyProjs.map(ep => `
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:#334155;">
+                <input type="checkbox" class="cl-chk-proj" value="${ep.id}" checked />
+                <span><strong>${ep.name}</strong> (ID: ${ep.id} · ${(ep.pages || []).length}頁)</span>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+
+        <!-- 類別 3：無人引用的孤兒圖片（附縮圖預覽） -->
+        <div style="background:#FFF; border:1px solid #CBD5E1; border-radius:6px; padding:6px 8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span>• 無人引用的孤兒圖片：<strong>${orphanMediaDocs.length}</strong> 張</span>
+            ${orphanMediaDocs.length > 0 ? `
+              <div style="display:flex; gap:4px;">
+                <button type="button" class="btn-outline btn-sm" id="cl-media-sel-all">全選/取消</button>
+                <button type="button" class="btn-outline btn-sm cl-toggle-detail" data-target="cl-media-list">👁️ 預覽縮圖明細</button>
+              </div>
+            ` : ""}
+          </div>
+          <div id="cl-media-list" class="hidden" style="margin-top:6px; padding-top:6px; border-top:1px dashed #E2E8F0; display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:6px; max-height:240px; overflow-y:auto;">
+            ${orphanMediaDocs.map(m => `
+              <label style="display:flex; flex-direction:column; gap:3px; border:1px solid #E2E8F0; border-radius:5px; padding:4px; background:#F8FAFC; cursor:pointer;">
+                <div style="display:flex; align-items:center; gap:4px;">
+                  <input type="checkbox" class="cl-chk-media" value="${m.id}" checked />
+                  <span style="font-size:10px; color:#475569; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${m.id}</span>
+                </div>
+                <div style="height:64px; background:#E2E8F0; border-radius:3px; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+                  ${m.imageData ? `<img src="${m.imageData}" style="width:100%; height:100%; object-fit:contain;" />` : `<span style="font-size:10px; color:#94A3B8;">無預覽</span>`}
+                </div>
+              </label>
+            `).join("")}
+          </div>
+        </div>
       </div>
+
       <button id="btn-exec-clean" class="btn-solid btn-sm" style="background:#DC2626; border-color:#DC2626;">
-        🧹 一鍵徹底清理以上零碎與重複資料
+        🧹 清理已勾選的零碎與重複資料
       </button>
     `;
 
+    body.querySelectorAll(".cl-toggle-detail").forEach(btn => {
+      btn.onclick = () => {
+        const target = document.getElementById(btn.dataset.target);
+        if (target) target.classList.toggle("hidden");
+      };
+    });
+
+    const selAllBtn = document.getElementById("cl-media-sel-all");
+    if (selAllBtn) {
+      selAllBtn.onclick = () => {
+        const boxes = body.querySelectorAll(".cl-chk-media");
+        const anyUnchecked = Array.from(boxes).some(b => !b.checked);
+        boxes.forEach(b => { b.checked = anyUnchecked; });
+      };
+    }
+
     document.getElementById("btn-exec-clean").onclick = async () => {
-      if (!confirm(`確定要永久清理這 ${duplicateProjs.length + emptyProjs.length} 筆零碎工程與 ${orphanMediaIds.length} 張孤兒圖片嗎？`)) return;
+      const checkedProjs = Array.from(body.querySelectorAll(".cl-chk-proj:checked")).map(i => i.value);
+      const checkedMedias = Array.from(body.querySelectorAll(".cl-chk-media:checked")).map(i => i.value);
+      if (!checkedProjs.length && !checkedMedias.length) {
+        alert("請至少勾選一項要清理的資料。");
+        return;
+      }
+      if (!confirm(`確定要永久清理已勾選的 ${checkedProjs.length} 筆工程與 ${checkedMedias.length} 張孤兒圖片嗎？`)) return;
+
       const execBtn = document.getElementById("btn-exec-clean");
       execBtn.disabled = true;
       execBtn.textContent = "清理中，請稍候...";
 
-      for (const dp of duplicateProjs) {
-        await deleteDoc(doc(db, PROJ_COL, dp.id)).catch(() => {});
+      for (const pid of checkedProjs) {
+        await deleteDoc(doc(db, PROJ_COL, pid)).catch(() => {});
       }
-      for (const ep of emptyProjs) {
-        await deleteDoc(doc(db, PROJ_COL, ep.id)).catch(() => {});
-      }
-      for (const mid of orphanMediaIds) {
+      for (const mid of checkedMedias) {
         await deleteDoc(doc(db, MEDIA_COL, mid)).catch(() => {});
       }
 
-      alert("✅ 資料庫清理完成！");
+      alert("✅ 已清理完成！");
       renderProjectList();
     };
   } catch (err) {
@@ -997,7 +1100,6 @@ function renderSinglePageEditor(page) {
     setTimeout(() => { saveBtn.textContent = "💾 儲存"; }, 1400);
   };
 
-  // 白底切換按鈕
   const whiteBtn = document.getElementById("btn-toggle-white-bg");
   whiteBtn.onclick = () => {
     if (!activeCanvasInstance) {
