@@ -1232,6 +1232,20 @@ function renderCleanFolderGrid(host, sortedGroups, allPages) {
       renderWorkspace();
     };
   });
+// 自動在背景按需載入各空間卡片的封面圖預覽（已快取者零數據消耗）
+  sortedGroups.forEach(async ([spaceName, items]) => {
+    const activeSubIdx = Math.min(folderCoverIndex[spaceName] || 0, items.length - 1);
+    const coverPage = items[activeSubIdx];
+    if (!coverPage || coverPage.sitePhotoUrl || memoryPhotoCache.has(coverPage.id)) return;
+    const url = await ensureSinglePagePhoto(currentProject, coverPage);
+    if (url) {
+      const box = host.querySelector(`.folder-main-preview[data-open-page="${allPages.indexOf(coverPage)}"]`);
+      if (box) {
+        box.innerHTML = `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />`;
+      }
+    }
+  });
+  
 }
 
 function renderExpandedSpacePages(host, sortedGroups, allPages) {
