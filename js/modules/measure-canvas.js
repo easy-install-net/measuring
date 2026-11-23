@@ -1,7 +1,7 @@
 const ARROW_STATUS_BUTTONS = [
-  { key: "OK", label: "✅ 確認無誤", bg: "#DCFCE7", fg: "#166534", border: "#86EFAC" },
-  { key: "NEED_FIX", label: "❌ 需修改", bg: "#FEE2E2", fg: "#991B1B", border: "#FCA5A5" },
-  { key: "SITE_CHECK", label: "⚠️ 現場核對", bg: "#FEF3C7", fg: "#92400E", border: "#FCD34D" },
+  { key: "OK", label: "✅ 確認", bg: "#DCFCE7", fg: "#166534", border: "#86EFAC" },
+  { key: "NEED_FIX", label: "❌ 需改", bg: "#FEE2E2", fg: "#991B1B", border: "#FCA5A5" },
+  { key: "SITE_CHECK", label: "⚠️再核對", bg: "#FEF3C7", fg: "#92400E", border: "#FCD34D" },
   { key: "NEED_INFO", label: "📌 待補資料", bg: "#DBEAFE", fg: "#1E40AF", border: "#93C5FD" }
 ];
 
@@ -41,6 +41,7 @@ export class MeasureCanvas {
     this.undoStack = [];
 
     this.scale = 1;
+    this.fitScale = 1;
     this.offsetX = 0;
     this.offsetY = 0;
     this.isPanning = false;
@@ -69,6 +70,12 @@ export class MeasureCanvas {
 
     this.buildDOM();
     this.bindEvents();
+  }
+
+  // 計算當前縮放倍率下的「所見即所得」基礎字級，避免放大圖紙時新打的文字變成芝麻小字
+  getAdaptiveFontSize(basePx = 18) {
+    const zoomRatio = Math.max(0.8, this.scale / Math.max(0.05, this.fitScale || 1));
+    return Math.min(72, Math.max(basePx, Math.round(basePx * zoomRatio)));
   }
 
   getPhraseBank() {
@@ -117,9 +124,15 @@ export class MeasureCanvas {
     img.src = dataUrl;
   }
 
-  // 一鍵將貼圖（單張或全部）合併壓進底圖並儲存
-  async flattenOverlaysIntoBase(onlyIndex = -1) {
-    if (!this.overlays.length) return;
+  // 支援將「文字 / 印章 / 拉尺線 / 箭頭 / 貼圖」合併到底圖成為一張高清更新圖片
+  async flattenItemIntoBase(targetItem) {
+    if (!targetItem) return;
+    const { type, index } = targetItem;
+    const obj = this.getObjectByTypeAndIndex(type, index);
+    if (!obj) return;
+
+    this.pushUndoSnapshot();
+
     const baseW = this.bgImg?.naturalWidth || 1600;
     const baseH = this.bgImg?.naturalHeight || 1200;
     const off = document.createElement("canvas");
@@ -134,24 +147,89 @@ export class MeasureCanvas {
       octx.drawImage(this.bgImg, 0, 0, baseW, baseH);
     }
 
-    const toMerge = onlyIndex >= 0 ? [this.overlays[onlyIndex]] : [...this.overlays];
-    for (const ov of toMerge) {
-      if (!ov || !ov.src) continue;
-      const im = this.getOverlayImageElement(ov.src);
+    const renderScale = Math.max(0.2, this.scale || 1);
+
+    if (type === "overlay") {
+      const im = this.getOverlayImageElement(obj.src);
       if (im && im.complete && im.naturalWidth) {
         octx.save();
-        octx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        octx.drawImage(im, obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
         octx.strokeStyle = "#94A3B8";
         octx.lineWidth = 3;
-        octx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        octx.strokeRect(obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
         octx.restore();
       }
+    } else if (type === "marker") {
+      const fs = (obj.fontSize || 18) / renderScale;
+      octx.save();
+      octx.font = `800 ${fs}px sans-serif`;
+      const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
+      const padX = 6 / renderScale;
+      const padY = 4 / renderScale;
+      const w = wText + padX * 2;
+      const h = fs + padY * 2;
+      octx.fillStyle = "rgba(255,255,255,0.82)";
+      octx.beginPath();
+      octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
+      octx.fill();
+      octx.textAlign = "center";
+      octx.textBaseline = "middle";
+      octx.fillStyle = obj.color || "#DC2626";
+      octx.fillText(obj.text || "", obj.x, obj.y);
+      octx.restore();
+    } else if (type === "sticker") {
+      this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 15, 0.78, renderScale);
+    } else if (type === "line") {
+      octx.save();
+      const sw = (obj.strokeWidth || 1.8) / renderScale;
+      octx.strokeStyle = obj.color || "#2563EB";
+      octx.lineWidth = sw;
+      octx.beginPath();
+      octx.moveTo(obj.x1, obj.y1);
+      octx.lineTo(obj.x2, obj.y2);
+      octx.stroke();
+      if (obj.text) {
+        this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", 14, 0.9, renderScale);
+      }
+      octx.restore();
+    } else if (type === "arrow") {
+      octx.save();
+      const col = obj.color || "#DC2626";
+      const sw = (obj.strokeWidth || 1.8) / renderScale;
+      octx.strokeStyle = col;
+      octx.fillStyle = col;
+      octx.lineWidth = sw;
+      octx.beginPath();
+      octx.moveTo(obj.x1, obj.y1);
+      octx.lineTo(obj.x2, obj.y2);
+      octx.stroke();
+      const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
+      const headLen = 12 / renderScale;
+      octx.beginPath();
+      octx.moveTo(obj.x1, obj.y1);
+      octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
+      octx.lineTo(obj.x1 - headLen * Math.cos(ang + Math.PI / 6), obj.y1 - headLen * Math.sin(ang + Math.PI / 6));
+      octx.closePath();
+      octx.fill();
+      if (obj.text) {
+        this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 16, 0.8, renderScale);
+      }
+      octx.restore();
+    } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
+      octx.save();
+      octx.strokeStyle = obj.color || "#DC2626";
+      octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
+      octx.lineCap = "round";
+      octx.lineJoin = "round";
+      octx.beginPath();
+      octx.moveTo(obj.points[0].x, obj.points[0].y);
+      for (let i = 1; i < obj.points.length; i++) octx.lineTo(obj.points[i].x, obj.points[i].y);
+      octx.stroke();
+      octx.restore();
     }
 
     const mergedDataUrl = off.toDataURL("image/jpeg", 0.88);
-    if (onlyIndex >= 0) this.overlays.splice(onlyIndex, 1);
-    else this.overlays = [];
-
+    this.deleteObjectAt(type, index);
     this.selectedItem = null;
     this.updateNearToolbar();
     this.imageUrl = mergedDataUrl;
@@ -163,10 +241,12 @@ export class MeasureCanvas {
       await this.navOpts.onBaseImageMerged(mergedDataUrl);
     }
     this.emitSave();
+    this.render();
   }
 
   pushUndoSnapshot() {
     const snap = JSON.stringify({
+      imageUrl: this.imageUrl,
       lines: this.lines,
       markers: this.markers,
       paths: this.paths,
@@ -179,7 +259,7 @@ export class MeasureCanvas {
     this.updateUndoButtonState();
   }
 
-  undo() {
+  async undo() {
     if (!this.undoStack.length) return;
     const prev = JSON.parse(this.undoStack.pop());
     this.lines = prev.lines || [];
@@ -188,6 +268,15 @@ export class MeasureCanvas {
     this.arrows = prev.arrows || [];
     this.stickers = prev.stickers || [];
     this.overlays = prev.overlays || [];
+    if (prev.imageUrl && prev.imageUrl !== this.imageUrl) {
+      this.imageUrl = prev.imageUrl;
+      this.bgImg = new Image();
+      this.bgImg.onload = () => this.render();
+      this.bgImg.src = prev.imageUrl;
+      if (typeof this.navOpts.onBaseImageMerged === "function") {
+        await this.navOpts.onBaseImageMerged(prev.imageUrl);
+      }
+    }
     this.selectedItem = null;
     this.updateNearToolbar();
     this.updateUndoButtonState();
@@ -290,8 +379,8 @@ export class MeasureCanvas {
           <div class="mc-stamp-items" style="display:flex; flex-wrap:wrap; gap:5px;"></div>
         </div>
 
-        <!-- 選中物件的小工具條（拉遠距離不遮擋 + < > 微調按鈕 + 快捷色點 + 合併貼圖 + 純圖示 ✏️ 🗑️） -->
-        <div class="mc-near-toolbar hidden" style="position:absolute; display:flex; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.94); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.28); z-index:35; white-space:nowrap;">
+        <!-- 選中物件的小工具條（100% 穩定彈出 + < > 微調 + 快捷色點 + 📌 合併到底圖 + 純圖示 ✏️ 🗑️） -->
+        <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:55; white-space:nowrap;">
           <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
           <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">18</span>
           <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
@@ -303,7 +392,7 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <button type="button" class="mc-near-merge hidden" title="合併貼圖進底圖" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">📌 合併貼圖</button>
+          <button type="button" class="mc-near-merge" title="合併到底圖成為一張更新圖片" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">📌 合併到底圖</button>
           <button type="button" class="mc-near-edit" title="改字" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">✏️</button>
           <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">🗑️</button>
         </div>
@@ -441,6 +530,7 @@ export class MeasureCanvas {
     const availH = Math.max(100, this.viewH - padTop);
     const s = Math.min(this.viewW / iw, availH / ih);
     this.scale = s;
+    this.fitScale = s;
     this.offsetX = (this.viewW - iw * s) / 2;
     this.offsetY = padTop + (availH - ih * s) / 2;
   }
@@ -469,7 +559,6 @@ export class MeasureCanvas {
 
     this.rootEl.querySelector(".mc-undo-btn").onclick = () => this.undo();
 
-    // 🖼️ 貼圖選擇與壓縮匯入
     const overlayInput = this.rootEl.querySelector(".mc-overlay-file-input");
     this.rootEl.querySelector(".mc-overlay-pick-btn").onclick = () => overlayInput.click();
     overlayInput.onchange = (e) => {
@@ -513,9 +602,9 @@ export class MeasureCanvas {
         obj.w = Math.max(40, obj.w * factor);
         obj.h = Math.max(40, obj.h * factor);
       } else if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
-        const next = Math.min(60, Math.max(10, (obj.fontSize || 18) + delta));
+        const step = Math.max(2, Math.round((obj.fontSize || 18) * 0.14));
+        const next = Math.min(120, Math.max(10, (obj.fontSize || 18) + (delta > 0 ? step : -step)));
         obj.fontSize = next;
-        this.fontSize = next;
       } else {
         const next = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
         obj.strokeWidth = next;
@@ -528,9 +617,10 @@ export class MeasureCanvas {
     this.nearToolbar.querySelector(".mc-near-dec").onclick = () => adjustSelectedSize(-2);
     this.nearToolbar.querySelector(".mc-near-inc").onclick = () => adjustSelectedSize(2);
 
+    // 點擊「📌 合併到底圖」，將目前選中的文字 / 印章 / 線條 / 貼圖永久燒錄進底圖並存上雲端
     this.nearToolbar.querySelector(".mc-near-merge").onclick = async () => {
-      if (this.selectedItem?.type !== "overlay") return;
-      await this.flattenOverlaysIntoBase(this.selectedItem.index);
+      if (!this.selectedItem) return;
+      await this.flattenItemIntoBase(this.selectedItem);
     };
 
     this.nearToolbar.querySelectorAll(".mc-near-color").forEach(btn => {
@@ -747,6 +837,7 @@ export class MeasureCanvas {
     }
 
     if (this.mode === "TEXT") {
+      const adaptiveFs = this.getAdaptiveFontSize(18);
       this.openPlainTextEditor(sx, sy, "", (txt) => {
         if (!txt.trim()) {
           this.setMode("VIEW");
@@ -757,7 +848,7 @@ export class MeasureCanvas {
           x: pt.x, y: pt.y,
           text: txt.trim(),
           color: this.activeColor,
-          fontSize: this.fontSize
+          fontSize: adaptiveFs
         });
         this.selectedItem = { type: "marker", index: this.markers.length - 1 };
         this.setMode("VIEW");
@@ -775,13 +866,14 @@ export class MeasureCanvas {
         }
         return;
       }
+      const adaptiveFs = this.getAdaptiveFontSize(15);
       this.pushUndoSnapshot();
       this.stickers.push({
         x: pt.x, y: pt.y,
         label: this.selectedStampLabel,
         bg: this.activeColor === "#FFFFFF" ? "#0F172A" : this.activeColor,
         color: "#FFFFFF",
-        fontSize: 15
+        fontSize: adaptiveFs
       });
       this.selectedItem = { type: "sticker", index: this.stickers.length - 1 };
       this.setMode("VIEW");
@@ -798,7 +890,7 @@ export class MeasureCanvas {
         x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
         color: this.activeColor,
         strokeWidth: this.strokeWidth,
-        fontSize: this.fontSize,
+        fontSize: this.getAdaptiveFontSize(16),
         text: "",
         status: "NEED_FIX"
       };
@@ -1058,9 +1150,7 @@ export class MeasureCanvas {
     this.commitArrowEditor(shouldSave);
   }
 
-  getSelectedObject() {
-    if (!this.selectedItem) return null;
-    const { type, index } = this.selectedItem;
+  getObjectByTypeAndIndex(type, index) {
     if (type === "line") return this.lines[index];
     if (type === "marker") return this.markers[index];
     if (type === "path") return this.paths[index];
@@ -1068,6 +1158,11 @@ export class MeasureCanvas {
     if (type === "sticker") return this.stickers[index];
     if (type === "overlay") return this.overlays[index];
     return null;
+  }
+
+  getSelectedObject() {
+    if (!this.selectedItem) return null;
+    return this.getObjectByTypeAndIndex(this.selectedItem.type, this.selectedItem.index);
   }
 
   getObjectAnchorImg(type, obj) {
@@ -1085,7 +1180,7 @@ export class MeasureCanvas {
   updateNearToolbar() {
     const obj = this.getSelectedObject();
     if (!obj) {
-      this.nearToolbar.classList.add("hidden");
+      this.nearToolbar.style.display = "none";
       return;
     }
     const anchor = this.getObjectAnchorImg(this.selectedItem.type, obj);
@@ -1093,16 +1188,13 @@ export class MeasureCanvas {
 
     const valEl = this.nearToolbar.querySelector(".mc-near-val");
     const editBtn = this.nearToolbar.querySelector(".mc-near-edit");
-    const mergeBtn = this.nearToolbar.querySelector(".mc-near-merge");
     const colorsWrap = this.nearToolbar.querySelector(".mc-near-colors-wrap");
 
     if (this.selectedItem.type === "overlay") {
       valEl.textContent = `${Math.round(obj.w)}w`;
       editBtn.style.display = "none";
       colorsWrap.style.display = "none";
-      mergeBtn.classList.remove("hidden");
     } else {
-      mergeBtn.classList.add("hidden");
       colorsWrap.style.display = "flex";
       if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
         valEl.textContent = String(obj.fontSize || 18);
@@ -1113,10 +1205,13 @@ export class MeasureCanvas {
       }
     }
 
-    this.nearToolbar.classList.remove("hidden");
-    const barW = 260;
-    const left = Math.max(8, Math.min(this.viewW - barW - 8, scr.x - barW / 2));
-    const top = scr.y + 68 > this.viewH - 12 ? Math.max(46, scr.y - 68) : Math.max(46, scr.y + 34);
+    // 直接使用 inline display:flex 顯示，徹底避免與 Tailwind .hidden 樣式衝突導致不彈出
+    this.nearToolbar.style.display = "flex";
+    const barW = 310;
+    const safeX = Number.isFinite(scr.x) ? scr.x : this.viewW / 2;
+    const safeY = Number.isFinite(scr.y) ? scr.y : this.viewH / 2;
+    const left = Math.max(8, Math.min(Math.max(8, this.viewW - barW - 8), safeX - barW / 2));
+    const top = safeY + 74 > this.viewH - 12 ? Math.max(48, safeY - 74) : Math.max(48, safeY + 34);
     this.nearToolbar.style.left = `${left}px`;
     this.nearToolbar.style.top = `${top}px`;
   }
@@ -1130,15 +1225,15 @@ export class MeasureCanvas {
     else if (type === "overlay") this.overlays.splice(idx, 1);
   }
 
-  getPillBoundsImg(ix, iy, text, fontPx = 15) {
-    const fs = fontPx / this.scale;
+  getPillBoundsImg(ix, iy, text, fontPx = 15, targetScale = this.scale) {
+    const fs = fontPx / targetScale;
     this.ctx.save();
     this.ctx.font = `800 ${fs}px sans-serif`;
     const lines = String(text || "").split("\n");
-    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), 20 / this.scale);
+    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), 20 / targetScale);
     this.ctx.restore();
-    const padX = 8 / this.scale;
-    const padY = 5 / this.scale;
+    const padX = 8 / targetScale;
+    const padY = 5 / targetScale;
     const lineH = fs * 1.25;
     const boxW = maxW + padX * 2;
     const boxH = lines.length * lineH + padY * 2;
@@ -1159,7 +1254,7 @@ export class MeasureCanvas {
   }
 
   hitTest(ix, iy) {
-    const tol = 22 / this.scale;
+    const tol = 26 / this.scale;
     for (let i = this.stickers.length - 1; i >= 0; i--) {
       const s = this.stickers[i];
       const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 15);
@@ -1244,7 +1339,6 @@ export class MeasureCanvas {
       ctx.drawImage(this.bgImg, 0, 0);
     }
 
-    // 繪製貼圖圖層（未合併前可自由移動縮放）
     this.overlays.forEach((ov, idx) => {
       const im = this.getOverlayImageElement(ov.src);
       if (im && im.complete && im.naturalWidth) {
@@ -1300,7 +1394,7 @@ export class MeasureCanvas {
       if (l.text) {
         const mx = (l.x1 + l.x2) / 2;
         const my = (l.y1 + l.y2) / 2;
-        this.drawPillLabel(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", 14, 0.88);
+        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", 14, 0.88, this.scale, false);
       }
       if (this.selectedItem?.type === "line" && this.selectedItem.index === idx) {
         ctx.strokeStyle = "#FACC15";
@@ -1338,7 +1432,7 @@ export class MeasureCanvas {
 
       const isSel = this.selectedItem?.type === "arrow" && this.selectedItem.index === idx;
       if (a.text) {
-        this.drawPillLabel(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 16, 0.78, isSel);
+        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 16, 0.78, this.scale, isSel);
       }
       if (isSel) {
         ctx.strokeStyle = "#FACC15";
@@ -1378,17 +1472,17 @@ export class MeasureCanvas {
     this.stickers.forEach((st, idx) => {
       ctx.save();
       const isSel = this.selectedItem?.type === "sticker" && this.selectedItem.index === idx;
-      this.drawPillLabel(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 15, 0.76, isSel);
+      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 15, 0.76, this.scale, isSel);
       ctx.restore();
     });
 
     ctx.restore();
   }
 
-  drawPillLabel(ctx, ix, iy, text, bg, fg, fontPx = 15, bgAlpha = 0.76, isSelected = false) {
-    const b = this.getPillBoundsImg(ix, iy, text, fontPx);
-    const fs = fontPx / this.scale;
-    const padY = 5 / this.scale;
+  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, fontPx = 15, bgAlpha = 0.76, targetScale = this.scale, isSelected = false) {
+    const b = this.getPillBoundsImg(ix, iy, text, fontPx, targetScale);
+    const fs = fontPx / targetScale;
+    const padY = 5 / targetScale;
     const lineH = fs * 1.25;
     const lines = String(text || "").split("\n");
 
@@ -1396,12 +1490,12 @@ export class MeasureCanvas {
     ctx.globalAlpha = bgAlpha;
     ctx.fillStyle = bg;
     ctx.beginPath();
-    ctx.roundRect(b.x, b.y, b.w, b.h, 6 / this.scale);
+    ctx.roundRect(b.x, b.y, b.w, b.h, 6 / targetScale);
     ctx.fill();
 
     ctx.globalAlpha = 1;
     ctx.strokeStyle = isSelected ? "#FACC15" : bg;
-    ctx.lineWidth = (isSelected ? 2.8 : 1.2) / this.scale;
+    ctx.lineWidth = (isSelected ? 2.8 : 1.2) / targetScale;
     ctx.stroke();
 
     ctx.font = `800 ${fs}px sans-serif`;
