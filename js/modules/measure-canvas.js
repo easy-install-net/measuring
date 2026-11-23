@@ -26,12 +26,13 @@ export class MeasureCanvas {
     this.paths = Array.isArray(initialData?.paths) ? initialData.paths : [];
     this.arrows = Array.isArray(initialData?.arrows) ? initialData.arrows : [];
     this.stickers = Array.isArray(initialData?.stickers) ? initialData.stickers : [];
+    this.overlays = Array.isArray(initialData?.overlays) ? initialData.overlays : [];
+    this.overlayImageCache = new Map();
     this.colors = normalizeColorList(colors);
     this.onChange = onChange;
     this.navOpts = navOpts;
 
-    // 預設進入安全「👁️ 檢視」模式，單指拖動與雙指縮放零誤觸
-    this.mode = "VIEW"; // VIEW | SELECT | ARROW | RULER | PEN | TEXT | STAMP | ERASER
+    this.mode = "VIEW"; // VIEW | SELECT | ARROW | RULER | PEN | TEXT | STAMP | OVERLAY | ERASER
     this.activeColor = this.colors[0] || "#DC2626";
     this.strokeWidth = 1.5;
     this.fontSize = 18;
@@ -78,13 +79,100 @@ export class MeasureCanvas {
     return typeof this.navOpts.getStampGroups === "function" ? (this.navOpts.getStampGroups() || []) : [];
   }
 
+  getOverlayImageElement(src) {
+    if (!src) return null;
+    if (this.overlayImageCache.has(src)) return this.overlayImageCache.get(src);
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => this.render();
+    img.src = src;
+    this.overlayImageCache.set(src, img);
+    return img;
+  }
+
+  addPhotoOverlay(dataUrl) {
+    if (!dataUrl) return;
+    const img = new Image();
+    img.onload = () => {
+      this.pushUndoSnapshot();
+      const baseW = this.bgImg?.naturalWidth || 1200;
+      const baseH = this.bgImg?.naturalHeight || 900;
+      const targetW = Math.min(baseW * 0.36, img.naturalWidth || 400);
+      const ratio = (img.naturalHeight || 300) / Math.max(1, img.naturalWidth || 400);
+      const targetH = targetW * ratio;
+      this.overlays.push({
+        x: baseW * 0.5,
+        y: baseH * 0.5,
+        w: targetW,
+        h: targetH,
+        src: dataUrl
+      });
+      this.overlayImageCache.set(dataUrl, img);
+      this.selectedItem = { type: "overlay", index: this.overlays.length - 1 };
+      this.setMode("SELECT");
+      this.updateNearToolbar();
+      this.emitSave();
+      this.render();
+    };
+    img.src = dataUrl;
+  }
+
+  // 一鍵將貼圖（單張或全部）合併壓進底圖並儲存
+  async flattenOverlaysIntoBase(onlyIndex = -1) {
+    if (!this.overlays.length) return;
+    const baseW = this.bgImg?.naturalWidth || 1600;
+    const baseH = this.bgImg?.naturalHeight || 1200;
+    const off = document.createElement("canvas");
+    off.width = baseW;
+    off.height = baseH;
+    const octx = off.getContext("2d");
+
+    if (this.whiteBg) {
+      octx.fillStyle = "#FFFFFF";
+      octx.fillRect(0, 0, baseW, baseH);
+    } else if (this.bgImg && this.bgImg.complete && this.bgImg.naturalWidth) {
+      octx.drawImage(this.bgImg, 0, 0, baseW, baseH);
+    }
+
+    const toMerge = onlyIndex >= 0 ? [this.overlays[onlyIndex]] : [...this.overlays];
+    for (const ov of toMerge) {
+      if (!ov || !ov.src) continue;
+      const im = this.getOverlayImageElement(ov.src);
+      if (im && im.complete && im.naturalWidth) {
+        octx.save();
+        octx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        octx.strokeStyle = "#94A3B8";
+        octx.lineWidth = 3;
+        octx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        octx.restore();
+      }
+    }
+
+    const mergedDataUrl = off.toDataURL("image/jpeg", 0.88);
+    if (onlyIndex >= 0) this.overlays.splice(onlyIndex, 1);
+    else this.overlays = [];
+
+    this.selectedItem = null;
+    this.updateNearToolbar();
+    this.imageUrl = mergedDataUrl;
+    this.bgImg = new Image();
+    this.bgImg.onload = () => this.render();
+    this.bgImg.src = mergedDataUrl;
+
+    if (typeof this.navOpts.onBaseImageMerged === "function") {
+      await this.navOpts.onBaseImageMerged(mergedDataUrl);
+    }
+    this.emitSave();
+  }
+
   pushUndoSnapshot() {
     const snap = JSON.stringify({
       lines: this.lines,
       markers: this.markers,
       paths: this.paths,
       arrows: this.arrows,
-      stickers: this.stickers
+      stickers: this.stickers,
+      overlays: this.overlays
     });
     this.undoStack.push(snap);
     if (this.undoStack.length > 35) this.undoStack.shift();
@@ -99,6 +187,7 @@ export class MeasureCanvas {
     this.paths = prev.paths || [];
     this.arrows = prev.arrows || [];
     this.stickers = prev.stickers || [];
+    this.overlays = prev.overlays || [];
     this.selectedItem = null;
     this.updateNearToolbar();
     this.updateUndoButtonState();
@@ -138,7 +227,7 @@ export class MeasureCanvas {
     this.activeColor = col;
     if (this.selectedItem) {
       const obj = this.getSelectedObject();
-      if (obj) {
+      if (obj && this.selectedItem.type !== "overlay") {
         this.pushUndoSnapshot();
         obj.color = col;
         if (this.selectedItem.type === "sticker") {
@@ -174,24 +263,25 @@ export class MeasureCanvas {
       <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none;">
         <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC;"></canvas>
 
-        <!-- 第二層精簡主工具列：左邊 A 組（最高頻度尺標註）｜ 右邊 B 組（操作後瀏覽/選取/復原/擦除） -->
+        <!-- 第二層精簡主工具列：左邊 A 組（拉尺/畫筆/文字/印章/貼圖）｜ 右邊 B 組（檢視/選取/復原/擦除） -->
         <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:4px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
-          <!-- A 組：平時最多用的度尺與標註工具 -->
           <button class="mc-tool-btn" data-mode="RULER" title="拉尺寸線">📏 拉尺</button>
           <button class="mc-tool-btn" data-mode="PEN" title="自由手繪">✏️ 畫筆</button>
           <button class="mc-tool-btn" data-mode="TEXT" title="普通純打字">🔤 文字</button>
           <button class="mc-tool-btn" data-mode="STAMP" title="現場常用印章">🏷️ 印章</button>
+          <button type="button" class="mc-overlay-pick-btn" title="插入局部細節貼圖並可合併" style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">🖼️ 貼圖</button>
 
           <span style="color:#CBD5E1; font-weight:300;">|</span>
 
-          <!-- B 組：A 操作後常用的檢視 / 選取 / 復原 / 擦除 -->
           <button class="mc-tool-btn active" data-mode="VIEW" title="安全檢視模式：單指拖動、雙指縮放不誤觸">👁️ 檢視</button>
-          <button class="mc-tool-btn" data-mode="SELECT" title="選取並移動已畫好的標註">✋ 選取</button>
+          <button class="mc-tool-btn" data-mode="SELECT" title="選取並移動已畫好的標註或貼圖">✋ 選取</button>
           <button class="mc-undo-btn" title="復原上一步" disabled style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 7px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; opacity:0.4;">↩ 復原</button>
           <button class="mc-tool-btn" data-mode="ERASER" title="點擊擦除單項">🧽 擦除</button>
         </div>
 
-        <!-- 🏷️ 現場常用詞印章面板（從雲端 Database 讀取，微半透明） -->
+        <input type="file" class="mc-overlay-file-input hidden" accept="image/*" />
+
+        <!-- 🏷️ 現場常用詞印章面板 -->
         <div class="mc-stamp-panel hidden" style="position:absolute; top:46px; left:50%; transform:translateX(-50%); width:min(440px, 94vw); background:rgba(255,255,255,0.92); backdrop-filter:blur(6px); border:1.5px solid #94A3B8; border-radius:10px; padding:7px 9px; box-shadow:0 8px 22px rgba(15,23,42,0.16); z-index:24; display:flex; flex-direction:column; gap:6px;">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
             <div class="mc-stamp-cats" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
@@ -200,23 +290,20 @@ export class MeasureCanvas {
           <div class="mc-stamp-items" style="display:flex; flex-wrap:wrap; gap:5px;"></div>
         </div>
 
-        <!-- 選中物件的小工具條（拉遠距離不遮擋 + < > 微調按鈕 + 快捷色點 + 純圖示 ✏️ 🗑️） -->
+        <!-- 選中物件的小工具條（拉遠距離不遮擋 + < > 微調按鈕 + 快捷色點 + 合併貼圖 + 純圖示 ✏️ 🗑️） -->
         <div class="mc-near-toolbar hidden" style="position:absolute; display:flex; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.94); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.28); z-index:35; white-space:nowrap;">
           <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
-          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:22px; text-align:center; color:#E2E8F0;">18</span>
+          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">18</span>
           <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
 
-          <span style="color:#475569;">|</span>
-
-          <div style="display:flex; align-items:center; gap:3px;">
+          <div class="mc-near-colors-wrap" style="display:flex; align-items:center; gap:3px; padding-left:4px; border-left:1px solid #475569;">
             ${quickColors.map(c => `
               <button type="button" class="mc-near-color" data-ncol="${c}"
                       style="width:14px; height:14px; border-radius:50%; background-color:${c}; border:1.5px solid #94A3B8; cursor:pointer; padding:0;"></button>
             `).join("")}
           </div>
 
-          <span style="color:#475569;">|</span>
-
+          <button type="button" class="mc-near-merge hidden" title="合併貼圖進底圖" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">📌 合併貼圖</button>
           <button type="button" class="mc-near-edit" title="改字" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">✏️</button>
           <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">🗑️</button>
         </div>
@@ -231,7 +318,7 @@ export class MeasureCanvas {
           </div>
         </div>
 
-        <!-- ↗ 箭頭批改瘦身小浮窗（4 顆並排狀態按鈕 + 雲端短語庫） -->
+        <!-- ↗ 箭頭批改瘦身小浮窗 -->
         <div class="mc-arrow-box hidden" style="position:absolute; width:min(275px, 88vw); background:#FFF; border:1.5px solid #2563EB; border-radius:9px; padding:6px; box-shadow:0 10px 24px rgba(15,23,42,0.22); z-index:45; display:flex; flex-direction:column; gap:5px;">
           <div class="mc-arrow-status-row" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:3px;">
             ${ARROW_STATUS_BUTTONS.map(sb => `
@@ -382,6 +469,30 @@ export class MeasureCanvas {
 
     this.rootEl.querySelector(".mc-undo-btn").onclick = () => this.undo();
 
+    // 🖼️ 貼圖選擇與壓縮匯入
+    const overlayInput = this.rootEl.querySelector(".mc-overlay-file-input");
+    this.rootEl.querySelector(".mc-overlay-pick-btn").onclick = () => overlayInput.click();
+    overlayInput.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const rawImg = new Image();
+        rawImg.onload = () => {
+          const maxSide = 900;
+          const sc = Math.min(1, maxSide / Math.max(rawImg.width, rawImg.height));
+          const c = document.createElement("canvas");
+          c.width = Math.round(rawImg.width * sc);
+          c.height = Math.round(rawImg.height * sc);
+          c.getContext("2d").drawImage(rawImg, 0, 0, c.width, c.height);
+          this.addPhotoOverlay(c.toDataURL("image/jpeg", 0.82));
+        };
+        rawImg.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+      overlayInput.value = "";
+    };
+
     this.stampPanel.querySelector(".mc-stamp-manage-btn").onclick = () => {
       if (typeof this.navOpts.onOpenDictManager === "function") {
         this.navOpts.onOpenDictManager("STAMP", () => this.renderStampPanelUI());
@@ -393,12 +504,15 @@ export class MeasureCanvas {
     const nextBtn = this.rootEl.querySelector(".mc-nav-next");
     if (nextBtn && this.navOpts.onNext) nextBtn.onclick = () => this.navOpts.onNext();
 
-    // 就近小工具條：< 縮小/變幼、> 放大/變粗、快捷色點、✏️ 改字、🗑️ 刪除
     const adjustSelectedSize = (delta) => {
       const obj = this.getSelectedObject();
       if (!obj) return;
       this.pushUndoSnapshot();
-      if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
+      if (this.selectedItem.type === "overlay") {
+        const factor = delta > 0 ? 1.15 : 0.87;
+        obj.w = Math.max(40, obj.w * factor);
+        obj.h = Math.max(40, obj.h * factor);
+      } else if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
         const next = Math.min(60, Math.max(10, (obj.fontSize || 18) + delta));
         obj.fontSize = next;
         this.fontSize = next;
@@ -414,10 +528,15 @@ export class MeasureCanvas {
     this.nearToolbar.querySelector(".mc-near-dec").onclick = () => adjustSelectedSize(-2);
     this.nearToolbar.querySelector(".mc-near-inc").onclick = () => adjustSelectedSize(2);
 
+    this.nearToolbar.querySelector(".mc-near-merge").onclick = async () => {
+      if (this.selectedItem?.type !== "overlay") return;
+      await this.flattenOverlaysIntoBase(this.selectedItem.index);
+    };
+
     this.nearToolbar.querySelectorAll(".mc-near-color").forEach(btn => {
       btn.onclick = () => {
         const obj = this.getSelectedObject();
-        if (!obj) return;
+        if (!obj || this.selectedItem.type === "overlay") return;
         this.pushUndoSnapshot();
         const col = btn.dataset.ncol;
         if (this.selectedItem.type === "sticker") {
@@ -550,7 +669,6 @@ export class MeasureCanvas {
     const sy = e.clientY - rect.top;
     const pt = this.screenToImg(sx, sy);
 
-    // 雙擊改字
     const now = Date.now();
     if (now - this.lastTapTime < 320 && this.lastTapPos && Math.hypot(sx - this.lastTapPos.x, sy - this.lastTapPos.y) < 22) {
       const hit = this.hitTest(pt.x, pt.y);
@@ -582,7 +700,6 @@ export class MeasureCanvas {
     this.lastTapTime = now;
     this.lastTapPos = { x: sx, y: sy };
 
-    // 👁️ 檢視模式：純粹平滑拖動看圖，不誤觸任何物件
     if (this.mode === "VIEW") {
       if (this.selectedItem) {
         this.selectedItem = null;
@@ -629,7 +746,6 @@ export class MeasureCanvas {
       return;
     }
 
-    // 🔤 普通純打字：確定後自動退回 👁️ 檢視模式
     if (this.mode === "TEXT") {
       this.openPlainTextEditor(sx, sy, "", (txt) => {
         if (!txt.trim()) {
@@ -652,7 +768,6 @@ export class MeasureCanvas {
       return;
     }
 
-    // 🏷️ 印章：蓋完 1 顆後自動退回 👁️ 檢視模式（不一路誤蓋）
     if (this.mode === "STAMP") {
       if (!this.selectedStampLabel) {
         if (typeof this.navOpts.onOpenDictManager === "function") {
@@ -739,7 +854,7 @@ export class MeasureCanvas {
       const obj = this.getSelectedObject();
       const orig = this.dragTarget.orig;
       if (obj && orig) {
-        if (this.dragTarget.type === "marker" || this.dragTarget.type === "sticker") {
+        if (this.dragTarget.type === "marker" || this.dragTarget.type === "sticker" || this.dragTarget.type === "overlay") {
           obj.x = orig.x + dx; obj.y = orig.y + dy;
         } else if (this.dragTarget.type === "line" || this.dragTarget.type === "arrow") {
           obj.x1 = orig.x1 + dx; obj.y1 = orig.y1 + dy;
@@ -951,11 +1066,13 @@ export class MeasureCanvas {
     if (type === "path") return this.paths[index];
     if (type === "arrow") return this.arrows[index];
     if (type === "sticker") return this.stickers[index];
+    if (type === "overlay") return this.overlays[index];
     return null;
   }
 
   getObjectAnchorImg(type, obj) {
     if (type === "marker" || type === "sticker") return { x: obj.x, y: obj.y };
+    if (type === "overlay") return { x: obj.x, y: obj.y + obj.h / 2 };
     if (type === "arrow") return { x: obj.x2, y: obj.y2 };
     if (type === "line") return { x: (obj.x1 + obj.x2) / 2, y: (obj.y1 + obj.y2) / 2 };
     if (type === "path" && obj.points?.length) {
@@ -976,19 +1093,29 @@ export class MeasureCanvas {
 
     const valEl = this.nearToolbar.querySelector(".mc-near-val");
     const editBtn = this.nearToolbar.querySelector(".mc-near-edit");
+    const mergeBtn = this.nearToolbar.querySelector(".mc-near-merge");
+    const colorsWrap = this.nearToolbar.querySelector(".mc-near-colors-wrap");
 
-    if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
-      valEl.textContent = String(obj.fontSize || 18);
-      editBtn.style.display = "inline-flex";
+    if (this.selectedItem.type === "overlay") {
+      valEl.textContent = `${Math.round(obj.w)}w`;
+      editBtn.style.display = "none";
+      colorsWrap.style.display = "none";
+      mergeBtn.classList.remove("hidden");
     } else {
-      valEl.textContent = String(obj.strokeWidth || 1.5);
-      editBtn.style.display = this.selectedItem.type === "line" ? "inline-flex" : "none";
+      mergeBtn.classList.add("hidden");
+      colorsWrap.style.display = "flex";
+      if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow") {
+        valEl.textContent = String(obj.fontSize || 18);
+        editBtn.style.display = "inline-flex";
+      } else {
+        valEl.textContent = String(obj.strokeWidth || 1.5);
+        editBtn.style.display = this.selectedItem.type === "line" ? "inline-flex" : "none";
+      }
     }
 
     this.nearToolbar.classList.remove("hidden");
-    const barW = 250;
+    const barW = 260;
     const left = Math.max(8, Math.min(this.viewW - barW - 8, scr.x - barW / 2));
-    // 與選中物件保持更舒適的間距（38px 以上），不貼太死遮擋線條
     const top = scr.y + 68 > this.viewH - 12 ? Math.max(46, scr.y - 68) : Math.max(46, scr.y + 34);
     this.nearToolbar.style.left = `${left}px`;
     this.nearToolbar.style.top = `${top}px`;
@@ -1000,9 +1127,9 @@ export class MeasureCanvas {
     else if (type === "path") this.paths.splice(idx, 1);
     else if (type === "arrow") this.arrows.splice(idx, 1);
     else if (type === "sticker") this.stickers.splice(idx, 1);
+    else if (type === "overlay") this.overlays.splice(idx, 1);
   }
 
-  // 精準計算標籤在畫布上的實際邊界（修復黃框與感應區偏移）
   getPillBoundsImg(ix, iy, text, fontPx = 15) {
     const fs = fontPx / this.scale;
     this.ctx.save();
@@ -1067,6 +1194,12 @@ export class MeasureCanvas {
         if (this.distToSegment(ix, iy, p.points[j - 1].x, p.points[j - 1].y, p.points[j].x, p.points[j].y) < tol) return { type: "path", index: i };
       }
     }
+    for (let i = this.overlays.length - 1; i >= 0; i--) {
+      const ov = this.overlays[i];
+      if (ix >= ov.x - ov.w / 2 && ix <= ov.x + ov.w / 2 && iy >= ov.y - ov.h / 2 && iy <= ov.y + ov.h / 2) {
+        return { type: "overlay", index: i };
+      }
+    }
     return null;
   }
 
@@ -1086,6 +1219,7 @@ export class MeasureCanvas {
         paths: this.paths,
         arrows: this.arrows,
         stickers: this.stickers,
+        overlays: this.overlays,
         newReviewNote,
         newReviewStatus
       });
@@ -1109,6 +1243,20 @@ export class MeasureCanvas {
     } else if (this.bgImg && this.bgImg.complete && this.bgImg.naturalWidth) {
       ctx.drawImage(this.bgImg, 0, 0);
     }
+
+    // 繪製貼圖圖層（未合併前可自由移動縮放）
+    this.overlays.forEach((ov, idx) => {
+      const im = this.getOverlayImageElement(ov.src);
+      if (im && im.complete && im.naturalWidth) {
+        ctx.save();
+        ctx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        const isSel = this.selectedItem?.type === "overlay" && this.selectedItem.index === idx;
+        ctx.strokeStyle = isSel ? "#FACC15" : "#64748B";
+        ctx.lineWidth = (isSel ? 3 : 1.2) / this.scale;
+        ctx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        ctx.restore();
+      }
+    });
 
     const allPaths = this.draftObj?.type === "path" ? [...this.paths, this.draftObj] : this.paths;
     allPaths.forEach((p, idx) => {
@@ -1204,7 +1352,6 @@ export class MeasureCanvas {
       ctx.restore();
     });
 
-    // 文字標註（以中心點 m.x, m.y 繪製，使黃框 100% 精準對齊）
     this.markers.forEach((m, idx) => {
       ctx.save();
       const b = this.getMarkerBoundsImg(m);
@@ -1228,7 +1375,6 @@ export class MeasureCanvas {
       ctx.restore();
     });
 
-    // 半透明底色現場印章（alpha = 0.76，可透視底下圖紙線條，黃框 100% 精準對齊）
     this.stickers.forEach((st, idx) => {
       ctx.save();
       const isSel = this.selectedItem?.type === "sticker" && this.selectedItem.index === idx;
