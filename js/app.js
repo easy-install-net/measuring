@@ -239,10 +239,14 @@ async function fetchActiveCloudProjects(forceRefresh = false) {
   if (!forceRefresh && Array.isArray(cachedCloudActiveList)) {
     return cachedCloudActiveList;
   }
-  const qActive = query(collection(db, PROJ_COL), where("archived", "!=", true));
-  const snap = await getDocs(qActive);
+  const snap = await getDocs(collection(db, PROJ_COL));
   const raw = [];
-  snap.forEach(d => raw.push({ id: d.id, ...d.data() }));
+  snap.forEach(d => {
+    const data = d.data();
+    if (data.archived !== true) {
+      raw.push({ id: d.id, ...data });
+    }
+  });
   cachedCloudActiveList = dedupProjects(raw);
   return cachedCloudActiveList;
 }
