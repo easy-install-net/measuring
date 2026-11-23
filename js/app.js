@@ -59,9 +59,14 @@ function normalizeReviewStatus(raw) {
 
 function applyBrandTitle() {
   document.title = "度尺批改";
-  document.querySelectorAll("header, nav, .navbar, .topbar, h1, a, span, strong, div").forEach(el => {
-    if (el.children.length === 0 && el.textContent && el.textContent.trim() === "MEASURING") {
-      el.textContent = "度尺批改";
+  document.querySelectorAll("header, nav, .navbar, .topbar, h1, a, span, strong, div, button").forEach(el => {
+    if (el.children.length === 0 && el.textContent) {
+      const txt = el.textContent.trim();
+      if (txt === "MEASURING") {
+        el.textContent = "度尺批改";
+      } else if (txt === "登入" && (el.tagName === "BUTTON" || el.tagName === "A")) {
+        el.style.display = "none";
+      }
     }
   });
 }
@@ -397,24 +402,32 @@ watchAuth(async () => {
   renderLoginView(root);
 });
 
+// 修復：直接讀取全部工程文件再前端過濾，避免 Firestore where("archived","!=",true) 把沒有 archived 欄位的舊工程過濾掉
+async function fetchAllCloudProjectsSplit(forceRefresh = false) {
+  if (!forceRefresh && Array.isArray(cachedCloudActiveList) && Array.isArray(cachedCloudArchivedList)) {
+    return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
+  }
+  const snap = await getDocs(collection(db, PROJ_COL));
+  const rawActive = [];
+  const rawArchived = [];
+  snap.forEach(d => {
+    const item = { id: d.id, ...d.data() };
+    if (item.archived === true) rawArchived.push(item);
+    else rawActive.push(item);
+  });
+  cachedCloudActiveList = dedupProjects(rawActive);
+  cachedCloudArchivedList = dedupProjects(rawArchived);
+  return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
+}
+
 async function fetchActiveCloudProjects(forceRefresh = false) {
-  if (!forceRefresh && Array.isArray(cachedCloudActiveList)) return cachedCloudActiveList;
-  const qActive = query(collection(db, PROJ_COL), where("archived", "!=", true));
-  const snap = await getDocs(qActive);
-  const raw = [];
-  snap.forEach(d => raw.push({ id: d.id, ...d.data() }));
-  cachedCloudActiveList = dedupProjects(raw);
-  return cachedCloudActiveList;
+  const { active } = await fetchAllCloudProjectsSplit(forceRefresh);
+  return active;
 }
 
 async function fetchArchivedCloudProjects(forceRefresh = false) {
-  if (!forceRefresh && Array.isArray(cachedCloudArchivedList)) return cachedCloudArchivedList;
-  const qArch = query(collection(db, PROJ_COL), where("archived", "==", true));
-  const snap = await getDocs(qArch);
-  const raw = [];
-  snap.forEach(d => raw.push({ id: d.id, ...d.data() }));
-  cachedCloudArchivedList = dedupProjects(raw);
-  return cachedCloudArchivedList;
+  const { archived } = await fetchAllCloudProjectsSplit(forceRefresh);
+  return archived;
 }
 
 async function renderProjectList(options = {}) {
@@ -1405,9 +1418,6 @@ function createBlankWhiteDataUrl() {
   return c.toDataURL("image/jpeg", 0.92);
 }
 
-// ==========================================
-// 4. 全屏無黑邊批改編輯器（含最頂頂通用屬性 + 貼圖合併雲端同步）
-// ==========================================
 async function renderSinglePageEditor(page) {
   const totalPages = currentProject.pages.length;
   const catLabel = normalizePageCategory(page);
@@ -1420,7 +1430,6 @@ async function renderSinglePageEditor(page) {
 
   root.innerHTML = `
     <div id="fullscreen-editor-shell" style="position:fixed; inset:0; width:100vw; height:100vh; background:#F8FAFC; display:flex; flex-direction:column; z-index:900; overflow:hidden;">
-      <!-- 最頂頂列：空間分類 ｜ 通用屬性（顏色圓點 · 幼細滑桿 · ⊡ 置中）｜ C 組專職批改（↗ 箭頭批改）｜ 白底/記錄/儲存 -->
       <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:#FFFFFF; border-bottom:1px solid #E2E8F0; flex-wrap:wrap; gap:5px; z-index:20;">
         <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
           <button id="btn-back-grid" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">‹ 返回圖集</button>
@@ -1469,7 +1478,6 @@ async function renderSinglePageEditor(page) {
         </div>
       </div>
 
-      <!-- 批改記錄抽屜 -->
       <div id="page-review-drawer" class="hidden" style="position:absolute; right:12px; top:44px; width:min(360px, 94vw); max-height:78vh; overflow-y:auto; background:#FFFFFF; color:#0F172A; border:1.5px solid #CBD5E1; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(15,23,42,0.18); z-index:40; display:flex; flex-direction:column; gap:8px;">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:5px;">
           <strong style="font-size:13px; color:#0F172A;">📝 本頁審圖批改記錄</strong>
