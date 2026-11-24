@@ -821,6 +821,53 @@ function openBatchUploadModal(projectSpaces, onCompleted) {
   picker.click();
 }
 
+function createBlankWhiteDataUrl() {
+  const c = document.createElement("canvas");
+  c.width = 1600; c.height = 1200;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillRect(0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.92);
+}
+
+async function createAndOpenNewPage(spaceName, options = {}) {
+  const { docType = "度尺圖", withWhitePaper = false, insertAfterIdx = -1 } = options;
+  if (!Array.isArray(currentProject.pages)) currentProject.pages = [];
+  const newPage = {
+    id: "PG_" + Date.now() + "_" + Math.floor(Math.random() * 1000),
+    pageNum: `P${currentProject.pages.length + 1}`,
+    space: spaceName || "總圖",
+    docTypeLabel: docType,
+    title: `${spaceName || "總圖"} · ${docType}`,
+    sitePhotoUrl: withWhitePaper ? createBlankWhiteDataUrl() : "",
+    lines: [],
+    markers: [],
+    paths: [],
+    arrows: [],
+    stickers: [],
+    overlays: [],
+    reviewLogs: []
+  };
+
+  if (newPage.sitePhotoUrl) {
+    memoryPhotoCache.set(newPage.id, newPage.sitePhotoUrl);
+  }
+
+  let targetIdx;
+  if (insertAfterIdx >= 0 && insertAfterIdx < currentProject.pages.length) {
+    targetIdx = insertAfterIdx + 1;
+    currentProject.pages.splice(targetIdx, 0, newPage);
+  } else {
+    currentProject.pages.push(newPage);
+    targetIdx = currentProject.pages.length - 1;
+  }
+
+  currentProject.pages.forEach((pg, idx) => { pg.pageNum = `P${idx + 1}`; });
+  activePageIdx = targetIdx;
+  await saveCurrentProject();
+  renderWorkspace();
+}
+
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -1623,6 +1670,7 @@ function renderOverview() {
       </div>
       <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
         <button id="btn-batch-upload-base" class="btn-solid btn-sm" style="background:#2563EB; border-color:#2563EB;">📤 批量上底圖</button>
+        <button id="btn-quick-new-blank" class="btn-outline btn-sm" style="color:#0F172A; font-weight:800;">📄 插白紙</button>
         <button id="btn-offline-cache-all" class="btn-outline btn-sm" style="color:#059669; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">📥 離線備份圖庫</button>
         <button id="btn-cloud-dict-open" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">⚙️ 雲端詞庫</button>
         <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#FCA5A5; color:#DC2626; font-weight:700;">
@@ -1681,7 +1729,7 @@ function renderOverview() {
 
     <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}" style="margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <div class="section-title" style="margin:0;">第一步：點選空間（或直接按右上方「📤 批量上底圖」）</div>
+        <div class="section-title" style="margin:0;">第一步：點選空間（或直接按右上方「📤 批量上底圖」/「📄 插白紙」）</div>
         <button id="btn-picker-manage-sp" class="btn-outline btn-sm" style="font-size:11px;">⚙️ 加減預設空間</button>
       </div>
       <div class="chip-grid" id="picker-spaces" style="margin-bottom:8px;"></div>
@@ -1718,6 +1766,11 @@ function renderOverview() {
 
   document.getElementById("btn-batch-upload-base").onclick = () => {
     openBatchUploadModal(allSpaces, () => renderOverview());
+  };
+
+  document.getElementById("btn-quick-new-blank").onclick = () => {
+    const targetSp = filterSpace !== "ALL" ? filterSpace : (allSpaces[0] || "總圖");
+    createAndOpenNewPage(targetSp, { docType: "度尺圖", withWhitePaper: true });
   };
 
   document.getElementById("btn-offline-cache-all").onclick = async () => {
@@ -1826,7 +1879,15 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, rend
               <strong style="font-size:15px; color:#0F172A;">${spaceName}</strong>
               <span style="font-size:11px; background:#F1F5F9; color:#475569; padding:1px 7px; border-radius:999px; font-weight:700;">${items.length}張</span>
             </div>
-            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <div style="display:flex; gap:5px; flex-wrap:wrap;">
+              <button class="btn-sp-add-page" data-aspace="${spaceName}"
+                      style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
+                ➕ 加頁 / 拍照
+              </button>
+              <button class="btn-sp-add-blank" data-bspace="${spaceName}"
+                      style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
+                📄 插白紙
+              </button>
               <button class="btn-quick-replace-measure" data-rspace="${spaceName}"
                       style="background:#F0FDF4; color:#166534; border:1px solid #BBF7D0; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
                 📷 替換度尺圖
@@ -1857,6 +1918,8 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, rend
                     </div>
                     <div style="display:flex; align-items:center; gap:4px;">
                       ${annCnt > 0 ? `<span style="font-size:10px; background:#EFF6FF; color:#1D4ED8; padding:1px 5px; border-radius:4px; font-weight:700;">📐${annCnt}</span>` : ""}
+                      <button type="button" class="btn-card-del-page" data-del-pidx="${realIdx}" title="刪除此頁"
+                              style="background:none; border:none; color:#94A3B8; font-size:12px; cursor:pointer; padding:0 2px;">🗑️</button>
                     </div>
                   </div>
                   <div id="thumb-slot-${p.id}" data-open-idx="${realIdx}" style="height:165px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
@@ -1875,6 +1938,28 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, rend
 
   host.querySelectorAll("[data-open-idx]").forEach(el => {
     el.onclick = () => { activePageIdx = Number(el.dataset.openIdx); renderWorkspace(); };
+  });
+
+  host.querySelectorAll(".btn-sp-add-page").forEach(btn => {
+    btn.onclick = () => createAndOpenNewPage(btn.dataset.aspace, { docType: "度尺圖", withWhitePaper: false });
+  });
+
+  host.querySelectorAll(".btn-sp-add-blank").forEach(btn => {
+    btn.onclick = () => createAndOpenNewPage(btn.dataset.bspace, { docType: "度尺圖", withWhitePaper: true });
+  });
+
+  host.querySelectorAll(".btn-card-del-page").forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.dataset.delPidx);
+      const target = allPages[idx];
+      if (!target) return;
+      if (!confirm(`確定刪除「${target.space || ""} · ${target.pageNum || ""}」嗎？`)) return;
+      currentProject.pages.splice(idx, 1);
+      currentProject.pages.forEach((pg, i) => { pg.pageNum = `P${i + 1}`; });
+      await saveCurrentProject();
+      renderOverview();
+    };
   });
 
   host.querySelectorAll(".btn-card-cat-tap").forEach(btn => {
@@ -1907,7 +1992,7 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, rend
         if (slot) {
           slot.innerHTML = url
             ? `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />`
-            : `<div style="text-align:center; color:#64748B; font-size:11px;">點擊開啟「${normalizePageCategory(pg)}」</div>`;
+            : `<div style="text-align:center; color:#64748B; font-size:11px;">空白頁 · 點擊開啟拍照或插白紙</div>`;
         }
       }));
     }
@@ -2063,28 +2148,8 @@ function setupDictPicker() {
     const spaceVal = titleInput.value.trim();
     const docTypeVal = document.getElementById("new-page-doctype").value;
     if (!spaceVal) return;
-    currentProject.pages.push({
-      id: "PG_" + Date.now(),
-      pageNum: `P${currentProject.pages.length + 1}`,
-      space: spaceVal,
-      docTypeLabel: docTypeVal,
-      title: `${spaceVal} · ${docTypeVal}`,
-      sitePhotoUrl: "",
-      lines: [], markers: [], paths: [], arrows: [], stickers: [], overlays: [], reviewLogs: []
-    });
-    activePageIdx = currentProject.pages.length - 1;
-    await saveCurrentProject();
-    renderWorkspace();
+    await createAndOpenNewPage(spaceVal, { docType: docTypeVal, withWhitePaper: false });
   };
-}
-
-function createBlankWhiteDataUrl() {
-  const c = document.createElement("canvas");
-  c.width = 1600; c.height = 1200;
-  const ctx = c.getContext("2d");
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, c.width, c.height);
-  return c.toDataURL("image/jpeg", 0.92);
 }
 
 async function renderSinglePageEditor(page) {
@@ -2114,6 +2179,15 @@ async function renderSinglePageEditor(page) {
           </select>
           <span style="font-size:11px; color:#64748B;">(${activePageIdx + 1}/${totalPages})</span>
 
+          <button type="button" id="btn-ed-add-page" title="在目前空間新增一頁"
+                  style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">
+            ➕ 加頁
+          </button>
+          <button type="button" id="btn-ed-del-page" title="刪除目前這一頁"
+                  style="background:#FEF2F2; color:#DC2626; border:1px solid #FECACA; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">
+            🗑️ 刪頁
+          </button>
+
           <button type="button" id="btn-toggle-space-strip"
                   style="background:#F1F5F9; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">
             🗂️ 本區圖集 (${sameSpacePages.length}) ▾
@@ -2141,15 +2215,15 @@ async function renderSinglePageEditor(page) {
 
         <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
           <button type="button" id="btn-top-arrow-mode" style="background:#FEF2F2; color:#DC2626; border:1.5px solid #FCA5A5; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">↗ 箭頭批改</button>
-          <button id="btn-toggle-white-bg" style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:4px 7px; font-size:12px; font-weight:700; cursor:pointer;">📄 白底</button>
+          <label style="background:#EFF6FF; color:#1D4ED8; border:1px solid #93C5FD; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:800; cursor:pointer;">
+            📸 拍照 / 插圖
+            <input type="file" id="up-site-photo" accept="image/*" class="hidden" />
+          </label>
+          <button id="btn-toggle-white-bg" style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:800; cursor:pointer;">📄 插白紙</button>
           <button id="btn-page-review-drawer" style="background:#FFF; color:#991B1B; border:1px solid #FECACA; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:800; cursor:pointer;">
             📝 記錄 (${page.reviewLogs.length})
           </button>
           <span id="top-auto-save-status" style="font-size:11px; font-weight:800; color:#059669; background:#ECFDF5; border:1px solid #A7F3D0; border-radius:999px; padding:3px 8px; white-space:nowrap;">☁️ 已自動儲存</span>
-          <label style="background:#F1F5F9; color:#334155; border:1px solid #CBD5E1; border-radius:6px; padding:4px 7px; font-size:12px; font-weight:700; cursor:pointer;">
-            📷 換底圖
-            <input type="file" id="up-site-photo" accept="image/*" class="hidden" />
-          </label>
         </div>
       </div>
 
@@ -2206,6 +2280,35 @@ async function renderSinglePageEditor(page) {
       </div>
     </div>
   `;
+
+  const saveAndRun = async (fn) => {
+    if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
+    await saveCurrentProject();
+    fn();
+  };
+
+  document.getElementById("btn-ed-add-page").onclick = () => {
+    saveAndRun(() => {
+      createAndOpenNewPage(currentSpace, {
+        docType: normalizePageCategory(page),
+        withWhitePaper: false,
+        insertAfterIdx: activePageIdx
+      });
+    });
+  };
+
+  document.getElementById("btn-ed-del-page").onclick = async () => {
+    if (!confirm(`確定刪除目前這一頁（${page.pageNum || ""} · ${currentSpace}）嗎？`)) return;
+    currentProject.pages.splice(activePageIdx, 1);
+    currentProject.pages.forEach((pg, i) => { pg.pageNum = `P${i + 1}`; });
+    await saveCurrentProject();
+    if (currentProject.pages.length === 0) {
+      activePageIdx = -1;
+    } else if (activePageIdx >= currentProject.pages.length) {
+      activePageIdx = currentProject.pages.length - 1;
+    }
+    renderWorkspace();
+  };
 
   const stripToggleBtn = document.getElementById("btn-toggle-space-strip");
   const stripDrawer = document.getElementById("ed-space-strip-drawer");
@@ -2360,12 +2463,6 @@ async function renderSinglePageEditor(page) {
     await saveCurrentProject();
   };
 
-  const saveAndRun = async (fn) => {
-    if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
-    await saveCurrentProject();
-    fn();
-  };
-
   document.getElementById("btn-back-grid").onclick = () => {
     saveAndRun(() => {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -2378,7 +2475,43 @@ async function renderSinglePageEditor(page) {
 
   const showMeasure = () => {
     if (!page.sitePhotoUrl) {
-      host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px; font-size:15px;">請先點擊右上角「📷 換底圖」拍照，或按「📄 白底」直接開白底草圖。</div>`;
+      host.innerHTML = `
+        <div style="height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px;">
+          <div style="font-size:15px; font-weight:800; color:#334155;">此頁尚未設定底圖，請選擇現場操作：</div>
+          <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:center;">
+            <label style="background:#2563EB; color:#FFF; border-radius:10px; padding:12px 18px; font-size:14px; font-weight:800; cursor:pointer; box-shadow:0 4px 12px rgba(37,99,235,0.25);">
+              📸 現場拍照 / 選底圖
+              <input type="file" id="center-pick-photo" accept="image/*" class="hidden" />
+            </label>
+            <button type="button" id="center-open-blank"
+                    style="background:#FFFFFF; color:#0F172A; border:1.5px solid #0F172A; border-radius:10px; padding:12px 18px; font-size:14px; font-weight:800; cursor:pointer;">
+              📄 開白紙草圖
+            </button>
+          </div>
+        </div>
+      `;
+      const centerPick = document.getElementById("center-pick-photo");
+      if (centerPick) {
+        centerPick.onchange = async (e) => {
+          const f = e.target.files[0];
+          if (!f) return;
+          host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px;">正在儲存底圖...</div>`;
+          const savedUrl = await savePhotoOfflineFirst(currentProject.id, page, f);
+          page.sitePhotoUrl = savedUrl;
+          memoryPhotoCache.set(page.id, savedUrl);
+          await saveCurrentProject();
+          showMeasure();
+        };
+      }
+      const centerBlank = document.getElementById("center-open-blank");
+      if (centerBlank) {
+        centerBlank.onclick = async () => {
+          page.sitePhotoUrl = createBlankWhiteDataUrl();
+          memoryPhotoCache.set(page.id, page.sitePhotoUrl);
+          await saveCurrentProject();
+          showMeasure();
+        };
+      }
       return;
     }
     activeCanvasInstance = new MeasureCanvas(
@@ -2458,11 +2591,17 @@ async function renderSinglePageEditor(page) {
   };
 
   const whiteBtn = document.getElementById("btn-toggle-white-bg");
-  whiteBtn.onclick = () => {
-    if (!activeCanvasInstance) { page.sitePhotoUrl = createBlankWhiteDataUrl(); showMeasure(); return; }
+  whiteBtn.onclick = async () => {
+    if (!activeCanvasInstance) {
+      page.sitePhotoUrl = createBlankWhiteDataUrl();
+      memoryPhotoCache.set(page.id, page.sitePhotoUrl);
+      await saveCurrentProject();
+      showMeasure();
+      return;
+    }
     const isWhite = activeCanvasInstance.toggleWhiteBackground();
     whiteBtn.style.background = isWhite ? "#FEF08A" : "#F8FAFC";
-    whiteBtn.textContent = isWhite ? "🖼️ 還原底圖" : "📄 白底";
+    whiteBtn.textContent = isWhite ? "🖼️ 還原底圖" : "📄 插白紙";
   };
 
   document.getElementById("up-site-photo").onchange = async (e) => {
