@@ -34,10 +34,10 @@ function buildAnnotatedPreviewDataUrl(page) {
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
-      const maxW = 1280;
-      const sc = Math.min(1, maxW / Math.max(1, img.naturalWidth || 1280));
-      const w = Math.round((img.naturalWidth || 1280) * sc);
-      const h = Math.round((img.naturalHeight || 960) * sc);
+      const maxW = 960;
+      const sc = Math.min(1, maxW / Math.max(1, img.naturalWidth || 960));
+      const w = Math.round((img.naturalWidth || 960) * sc);
+      const h = Math.round((img.naturalHeight || 720) * sc);
       const c = document.createElement("canvas");
       c.width = w;
       c.height = h;
@@ -137,11 +137,236 @@ function buildAnnotatedPreviewDataUrl(page) {
       });
 
       ctx.restore();
-      resolve(c.toDataURL("image/jpeg", 0.82));
+      resolve(c.toDataURL("image/jpeg", 0.68));
     };
     img.onerror = () => resolve(src);
     img.src = src;
   });
+}
+
+async function buildCleanSnapshot(project, chosenPages, opts, onProgress) {
+  const snapshotPages = [];
+  for (let i = 0; i < chosenPages.length; i++) {
+    const p = chosenPages[i];
+    if (onProgress) onProgress(i + 1, chosenPages.length, p);
+    const mergedImg = opts.includePhotos ? await buildAnnotatedPreviewDataUrl(p) : "";
+    const dimList = opts.includeDims
+      ? [
+          ...(Array.isArray(p.lines) ? p.lines : []).map(l => String(l?.text || "").trim()),
+          ...(Array.isArray(p.markers) ? p.markers : []).map(m => String(m?.text || "").trim())
+        ].filter(Boolean)
+      : [];
+    const logs = opts.includeIssues && Array.isArray(p.reviewLogs)
+      ? p.reviewLogs
+          .filter(r => r && typeof r === "object" && !Array.isArray(r))
+          .map(r => ({
+            note: String(r.note || "").trim(),
+            status: String(r.status || "NEED_FIX"),
+            time: String(r.time || "")
+          }))
+          .filter(r => r.note)
+      : [];
+
+    snapshotPages.push({
+      id: String(p.id || `pg_${i}`),
+      pageNum: String(p.pageNum || `P${i + 1}`),
+      space: String(p.space || "未標空間"),
+      category: String(normalizeCat(p)),
+      imageUrl: String(mergedImg || ""),
+      dimensions: dimList,
+      reviewLogs: logs
+    });
+  }
+
+  return {
+    projectId: String(project.id || ""),
+    projectName: String(project.name || "工程報告"),
+    updatedAt: Date.now(),
+    includeDims: Boolean(opts.includeDims),
+    includeIssues: Boolean(opts.includeIssues),
+    includePhotos: Boolean(opts.includePhotos),
+    pages: snapshotPages
+  };
+}
+
+function renderFormattedReportSheetView(container, data, onCloseAction) {
+  const pages = Array.isArray(data.pages) ? data.pages : [];
+  const dt = data.updatedAt ? new Date(data.updatedAt).toLocaleString("zh-HK") : "";
+
+  const groups = new Map();
+  pages.forEach(p => {
+    const sp = p.space || "未標空間";
+    if (!groups.has(sp)) groups.set(sp, []);
+    groups.get(sp).push(p);
+  });
+
+  const flatOrderedPages = Array.from(groups.entries()).flatMap(([sp, items]) =>
+    items.map(pg => ({ ...pg, spaceTitle: sp }))
+  );
+
+  const pairedSheets = [];
+  for (let i = 0; i < flatOrderedPages.length; i += 2) {
+    pairedSheets.push(flatOrderedPages.slice(i, i + 2));
+  }
+
+  let layoutMode = "PORTRAIT_2IN1"; // "PORTRAIT_2IN1" | "LANDSCAPE_1IN1"
+
+  const renderView = () => {
+    const isLandscape = layoutMode === "LANDSCAPE_1IN1";
+    const sheets = isLandscape ? flatOrderedPages.map(pg => [pg]) : pairedSheets;
+
+    container.innerHTML = `
+      <style>
+        @page {
+          size: ${isLandscape ? "A4 landscape" : "A4 portrait"};
+          margin: 3mm;
+        }
+        @media print {
+          body, html {
+            background: #FFFFFF !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+          header, nav, .navbar, .topbar, .no-print, #offline-status-pill {
+            display: none !important;
+          }
+          .rpt-root-wrap {
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            gap: 0 !important;
+          }
+          .rpt-a4-sheet {
+            height: ${isLandscape ? "202mm" : "289mm"} !important;
+            max-height: ${isLandscape ? "202mm" : "289mm"} !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: space-between !important;
+            gap: 2mm !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            box-sizing: border-box !important;
+            padding: 0 !important;
+            border: none !important;
+            box-shadow: none !important;
+            background: #FFFFFF !important;
+          }
+          .rpt-a4-sheet:last-child {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
+          .rpt-half-slot {
+            height: ${isLandscape ? "201mm" : "143mm"} !important;
+            max-height: ${isLandscape ? "201mm" : "143mm"} !important;
+            border: 0.5pt solid #CBD5E1 !important;
+            border-radius: 3px !important;
+            padding: 3px 5px !important;
+            box-sizing: border-box !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+            background: #FFFFFF !important;
+          }
+          .rpt-half-img {
+            flex: 1 !important;
+            min-height: 0 !important;
+            max-height: ${isLandscape ? "184mm" : "126mm"} !important;
+            width: 100% !important;
+            object-fit: contain !important;
+            border: none !important;
+          }
+        }
+      </style>
+
+      <div class="rpt-root-wrap" style="max-width:1040px; margin:0 auto; display:flex; flex-direction:column; gap:10px; padding-bottom:30px;">
+        <div class="card no-print" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:3px solid #0F172A; padding:10px 12px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button type="button" id="rpt-view-close-btn" class="btn-outline btn-sm" style="font-weight:800;">✕ 關閉</button>
+            <div>
+              <strong style="font-size:16px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
+              <div style="font-size:11px; color:#64748B; margin-top:1px;">
+                共 ${pages.length} 張圖紙 · 排為 ${sheets.length} 頁 PDF（極幼邊框）· ${dt}
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            <div style="display:inline-flex; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:2px;">
+              <button type="button" id="rpt-mode-portrait"
+                      style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${!isLandscape ? "#0F172A" : "transparent"}; color:${!isLandscape ? "#FFF" : "#475569"};">
+                📄 直向 2合1
+              </button>
+              <button type="button" id="rpt-mode-landscape"
+                      style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${isLandscape ? "#0F172A" : "transparent"}; color:${isLandscape ? "#FFF" : "#475569"};">
+                🖼️ 橫向 一張一頁
+              </button>
+            </div>
+
+            <button type="button" id="rpt-export-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
+              📥 輸出 PDF
+            </button>
+          </div>
+        </div>
+
+        ${sheets.map((pair, sheetIdx) => `
+          <div class="rpt-a4-sheet card" style="display:flex; flex-direction:column; gap:8px; padding:8px; border:1px solid #E2E8F0;">
+            ${pair.map(pg => `
+              <div class="rpt-half-slot" style="border:1px solid #CBD5E1; border-radius:4px; padding:5px 7px; background:#FFFFFF; display:flex; flex-direction:column; gap:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:0.5pt solid #E2E8F0; padding-bottom:2px;">
+                  <strong style="font-size:12px; color:#0F172A;">📍 ${pg.spaceTitle} · ${pg.pageNum || ""} (${pg.category || ""})</strong>
+                  <span style="font-size:10px; color:#64748B;">${data.projectName || ""} · ${sheetIdx + 1}/${sheets.length}</span>
+                </div>
+                ${pg.imageUrl ? `<img class="rpt-half-img" src="${pg.imageUrl}" style="width:100%; max-height:${isLandscape ? "640px" : "460px"}; object-fit:contain; background:#FFF;" />` : ""}
+                ${(pg.dimensions && pg.dimensions.length) ? `
+                  <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
+                    <span style="font-size:10px; font-weight:800; color:#1D4ED8;">📐 尺寸：</span>
+                    ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:0.5pt solid #BFDBFE; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${d}</span>`).join("")}
+                  </div>
+                ` : ""}
+                ${(pg.reviewLogs && pg.reviewLogs.length) ? `
+                  <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
+                    <span style="font-size:10px; font-weight:800; color:#991B1B;">📝 確認：</span>
+                    ${pg.reviewLogs.map(r => `<span style="background:#FEF2F2; border:0.5pt solid #FECACA; color:#991B1B; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${r.note}</span>`).join("")}
+                  </div>
+                ` : ""}
+              </div>
+            `).join("")}
+          </div>
+        `).join("")}
+      </div>
+    `;
+
+    container.querySelector("#rpt-mode-portrait").onclick = () => {
+      layoutMode = "PORTRAIT_2IN1";
+      renderView();
+    };
+    container.querySelector("#rpt-mode-landscape").onclick = () => {
+      layoutMode = "LANDSCAPE_1IN1";
+      renderView();
+    };
+
+    container.querySelector("#rpt-view-close-btn").onclick = () => {
+      if (typeof onCloseAction === "function") {
+        onCloseAction();
+      } else {
+        window.close();
+        setTimeout(() => {
+          if (window.history.length > 1) window.history.back();
+          else window.location.href = window.location.origin + window.location.pathname;
+        }, 120);
+      }
+    };
+
+    container.querySelector("#rpt-export-pdf-btn").onclick = () => {
+      const prevTitle = document.title;
+      const suffix = isLandscape ? "橫向一張一頁" : "直向2合1";
+      document.title = `${data.projectName || "度尺報告"}_${suffix}`;
+      window.print();
+      setTimeout(() => { document.title = prevTitle; }, 500);
+    };
+  };
+
+  renderView();
 }
 
 export function renderReportBuilder(container, project, onBack) {
@@ -168,7 +393,7 @@ export function renderReportBuilder(container, project, onBack) {
             <div style="font-size:12px; color:#64748B; margin-top:2px;">直接點擊下方縮圖卡片即可勾選或取消，已選 <strong>${selectedIds.size}</strong> / ${pages.length} 張</div>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button id="rb-print-btn" class="btn-outline btn-sm">🖨️ 匯出 / 列印 A4 報告</button>
+            <button id="rb-preview-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">📥 預覽與輸出 PDF（2合1 / 橫向）</button>
             <button id="rb-back-btn" class="btn-outline btn-sm">‹ 返回工程</button>
           </div>
         </div>
@@ -195,8 +420,8 @@ export function renderReportBuilder(container, project, onBack) {
           </div>
 
           <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; border-top:1px solid #E2E8F0; padding-top:8px;">
-            <button type="button" id="rb-gen-link-btn" class="btn-solid" style="background:#0F172A; border-color:#0F172A;">
-              🔗 生成客戶專用唯讀預覽連結（雲端短網址）
+            <button type="button" id="rb-gen-link-btn" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD; font-weight:800;">
+              🔗 生成客戶專用雲端短網址（供 WhatsApp 傳送）
             </button>
             <span id="rb-gen-status" style="font-size:12px; color:#059669; font-weight:700;"></span>
           </div>
@@ -213,7 +438,6 @@ export function renderReportBuilder(container, project, onBack) {
           </div>
         </div>
 
-        <!-- 空間縮圖卡片網格（一望就知邊張打邊張） -->
         <div style="display:flex; flex-direction:column; gap:10px;">
           ${Array.from(groupsMap.entries()).map(([spaceName, items]) => `
             <div class="card" style="padding:10px;">
@@ -256,10 +480,28 @@ export function renderReportBuilder(container, project, onBack) {
     `;
 
     container.querySelector("#rb-back-btn").onclick = () => onBack();
-    container.querySelector("#rb-print-btn").onclick = () => window.print();
     container.querySelector("#rb-chk-dims").onchange = (e) => { includeDims = e.target.checked; };
     container.querySelector("#rb-chk-issues").onchange = (e) => { includeIssues = e.target.checked; };
     container.querySelector("#rb-chk-photos").onchange = (e) => { includePhotos = e.target.checked; };
+
+    container.querySelector("#rb-preview-pdf-btn").onclick = async () => {
+      const chosenPages = pages.filter(p => selectedIds.has(p.id));
+      if (!chosenPages.length) {
+        alert("請至少勾選一張圖紙再輸出 PDF！");
+        return;
+      }
+      const btn = container.querySelector("#rb-preview-pdf-btn");
+      const statusEl = container.querySelector("#rb-gen-status");
+      btn.disabled = true;
+      btn.textContent = "⏳ 正在排版...";
+      const snapshotData = await buildCleanSnapshot(
+        project,
+        chosenPages,
+        { includeDims, includeIssues, includePhotos },
+        (cur, tot, p) => { statusEl.textContent = `正在合成標註圖 (${cur}/${tot})：${p.space || ""} ${p.pageNum || ""}...`; }
+      );
+      renderFormattedReportSheetView(container, snapshotData, () => renderUI());
+    };
 
     container.querySelector("#rb-sel-all").onclick = () => {
       pages.forEach(p => selectedIds.add(p.id));
@@ -326,45 +568,19 @@ export function renderReportBuilder(container, project, onBack) {
       const btn = container.querySelector("#rb-gen-link-btn");
       const statusEl = container.querySelector("#rb-gen-status");
       btn.disabled = true;
-      btn.textContent = "⏳ 正在合成標註圖並上傳雲端短網址...";
+      btn.textContent = "⏳ 正在合成並上傳雲端短網址...";
       statusEl.textContent = "";
 
       try {
         const token = "RPT_" + Date.now().toString(36).toUpperCase();
-        const snapshotPages = [];
+        const snapshotData = await buildCleanSnapshot(
+          project,
+          chosenPages,
+          { includeDims, includeIssues, includePhotos },
+          (cur, tot, p) => { statusEl.textContent = `正在處理 (${cur}/${tot})：${p.space || ""} ${p.pageNum || ""}...`; }
+        );
 
-        for (let i = 0; i < chosenPages.length; i++) {
-          const p = chosenPages[i];
-          statusEl.textContent = `正在處理 (${i + 1}/${chosenPages.length})：${p.space || ""} ${p.pageNum || ""}...`;
-          const mergedImg = includePhotos ? await buildAnnotatedPreviewDataUrl(p) : "";
-          const dimList = includeDims
-            ? [
-                ...(p.lines || []).map(l => l.text).filter(Boolean),
-                ...(p.markers || []).map(m => m.text).filter(Boolean)
-              ]
-            : [];
-          const logs = includeIssues ? (p.reviewLogs || []) : [];
-
-          snapshotPages.push({
-            id: p.id,
-            pageNum: p.pageNum || `P${i + 1}`,
-            space: p.space || "未標空間",
-            category: normalizeCat(p),
-            imageUrl: mergedImg,
-            dimensions: dimList,
-            reviewLogs: logs
-          });
-        }
-
-        await setDoc(doc(db, REPORT_COL, token), {
-          projectId: project.id || "",
-          projectName: project.name || "工程報告",
-          updatedAt: Date.now(),
-          includeDims,
-          includeIssues,
-          includePhotos,
-          pages: snapshotPages
-        });
+        await setDoc(doc(db, REPORT_COL, token), snapshotData);
 
         const baseUrl = window.location.origin + window.location.pathname;
         latestShareUrl = `${baseUrl}?share=${encodeURIComponent(token)}`;
@@ -372,7 +588,7 @@ export function renderReportBuilder(container, project, onBack) {
       } catch (err) {
         alert("生成雲端報告連結失敗：" + (err?.message || err));
         btn.disabled = false;
-        btn.textContent = "🔗 生成客戶專用唯讀預覽連結（雲端短網址）";
+        btn.textContent = "🔗 生成客戶專用雲端短網址（供 WhatsApp 傳送）";
       }
     };
   };
@@ -388,182 +604,7 @@ export async function renderPublicShareReportView(container, token) {
       container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626; font-weight:700;">找不到此報告連結或連結已過期。</div>`;
       return;
     }
-    const data = snap.data();
-    const pages = Array.isArray(data.pages) ? data.pages : [];
-    const dt = data.updatedAt ? new Date(data.updatedAt).toLocaleString("zh-HK") : "";
-
-    const groups = new Map();
-    pages.forEach(p => {
-      const sp = p.space || "未標空間";
-      if (!groups.has(sp)) groups.set(sp, []);
-      groups.get(sp).push(p);
-    });
-
-    const flatOrderedPages = Array.from(groups.entries()).flatMap(([sp, items]) =>
-      items.map(pg => ({ ...pg, spaceTitle: sp }))
-    );
-
-    const pairedSheets = [];
-    for (let i = 0; i < flatOrderedPages.length; i += 2) {
-      pairedSheets.push(flatOrderedPages.slice(i, i + 2));
-    }
-
-    let layoutMode = "PORTRAIT_2IN1"; // "PORTRAIT_2IN1" | "LANDSCAPE_1IN1"
-
-    const renderView = () => {
-      const isLandscape = layoutMode === "LANDSCAPE_1IN1";
-      const sheets = isLandscape
-        ? flatOrderedPages.map(pg => [pg])
-        : pairedSheets;
-
-      container.innerHTML = `
-        <style>
-          @page {
-            size: ${isLandscape ? "A4 landscape" : "A4 portrait"};
-            margin: 3mm;
-          }
-          @media print {
-            body, html {
-              background: #FFFFFF !important;
-              margin: 0 !important;
-              padding: 0 !important;
-            }
-            header, nav, .navbar, .topbar, .no-print {
-              display: none !important;
-            }
-            .rpt-root-wrap {
-              max-width: 100% !important;
-              margin: 0 !important;
-              padding: 0 !important;
-              gap: 0 !important;
-            }
-            .rpt-a4-sheet {
-              height: ${isLandscape ? "202mm" : "289mm"} !important;
-              max-height: ${isLandscape ? "202mm" : "289mm"} !important;
-              display: flex !important;
-              flex-direction: column !important;
-              justify-content: space-between !important;
-              gap: 2mm !important;
-              page-break-after: always !important;
-              break-after: page !important;
-              box-sizing: border-box !important;
-              padding: 0 !important;
-              border: none !important;
-              box-shadow: none !important;
-              background: #FFFFFF !important;
-            }
-            .rpt-a4-sheet:last-child {
-              page-break-after: auto !important;
-              break-after: auto !important;
-            }
-            .rpt-half-slot {
-              height: ${isLandscape ? "201mm" : "143mm"} !important;
-              max-height: ${isLandscape ? "201mm" : "143mm"} !important;
-              border: 0.5pt solid #CBD5E1 !important;
-              border-radius: 3px !important;
-              padding: 3px 5px !important;
-              box-sizing: border-box !important;
-              display: flex !important;
-              flex-direction: column !important;
-              overflow: hidden !important;
-              background: #FFFFFF !important;
-            }
-            .rpt-half-img {
-              flex: 1 !important;
-              min-height: 0 !important;
-              max-height: ${isLandscape ? "184mm" : "126mm"} !important;
-              width: 100% !important;
-              object-fit: contain !important;
-              border: none !important;
-            }
-          }
-        </style>
-
-        <div class="rpt-root-wrap" style="max-width:1040px; margin:0 auto; display:flex; flex-direction:column; gap:10px; padding-bottom:30px;">
-          <div class="card no-print" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:3px solid #0F172A; padding:10px 12px;">
-            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-              <button type="button" id="rpt-view-close-btn" class="btn-outline btn-sm" style="font-weight:800;">✕ 關閉</button>
-              <div>
-                <strong style="font-size:16px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
-                <div style="font-size:11px; color:#64748B; margin-top:1px;">
-                  共 ${pages.length} 張圖紙 · 排為 ${sheets.length} 頁 PDF（極幼邊框）· ${dt}
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-              <div style="display:inline-flex; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:2px;">
-                <button type="button" id="rpt-mode-portrait"
-                        style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${!isLandscape ? "#0F172A" : "transparent"}; color:${!isLandscape ? "#FFF" : "#475569"};">
-                  📄 直向 2合1
-                </button>
-                <button type="button" id="rpt-mode-landscape"
-                        style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${isLandscape ? "#0F172A" : "transparent"}; color:${isLandscape ? "#FFF" : "#475569"};">
-                  🖼️ 橫向 一張一頁
-                </button>
-              </div>
-
-              <button type="button" id="rpt-export-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
-                📥 輸出 PDF
-              </button>
-            </div>
-          </div>
-
-          ${sheets.map((pair, sheetIdx) => `
-            <div class="rpt-a4-sheet card" style="display:flex; flex-direction:column; gap:8px; padding:8px; border:1px solid #E2E8F0;">
-              ${pair.map(pg => `
-                <div class="rpt-half-slot" style="border:1px solid #CBD5E1; border-radius:4px; padding:5px 7px; background:#FFFFFF; display:flex; flex-direction:column; gap:4px;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:0.5pt solid #E2E8F0; padding-bottom:2px;">
-                    <strong style="font-size:12px; color:#0F172A;">📍 ${pg.spaceTitle} · ${pg.pageNum || ""} (${pg.category || ""})</strong>
-                    <span style="font-size:10px; color:#64748B;">${data.projectName || ""} · ${sheetIdx + 1}/${sheets.length}</span>
-                  </div>
-                  ${pg.imageUrl ? `<img class="rpt-half-img" src="${pg.imageUrl}" style="width:100%; max-height:${isLandscape ? "640px" : "460px"}; object-fit:contain; background:#FFF;" />` : ""}
-                  ${(pg.dimensions && pg.dimensions.length) ? `
-                    <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
-                      <span style="font-size:10px; font-weight:800; color:#1D4ED8;">📐 尺寸：</span>
-                      ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:0.5pt solid #BFDBFE; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${d}</span>`).join("")}
-                    </div>
-                  ` : ""}
-                  ${(pg.reviewLogs && pg.reviewLogs.length) ? `
-                    <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
-                      <span style="font-size:10px; font-weight:800; color:#991B1B;">📝 確認：</span>
-                      ${pg.reviewLogs.map(r => `<span style="background:#FEF2F2; border:0.5pt solid #FECACA; color:#991B1B; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${r.note}</span>`).join("")}
-                    </div>
-                  ` : ""}
-                </div>
-              `).join("")}
-            </div>
-          `).join("")}
-        </div>
-      `;
-
-      container.querySelector("#rpt-mode-portrait").onclick = () => {
-        layoutMode = "PORTRAIT_2IN1";
-        renderView();
-      };
-      container.querySelector("#rpt-mode-landscape").onclick = () => {
-        layoutMode = "LANDSCAPE_1IN1";
-        renderView();
-      };
-
-      container.querySelector("#rpt-view-close-btn").onclick = () => {
-        window.close();
-        setTimeout(() => {
-          if (window.history.length > 1) window.history.back();
-          else window.location.href = window.location.origin + window.location.pathname;
-        }, 120);
-      };
-
-      container.querySelector("#rpt-export-pdf-btn").onclick = () => {
-        const prevTitle = document.title;
-        const suffix = isLandscape ? "橫向一張一頁" : "直向2合1";
-        document.title = `${data.projectName || "度尺報告"}_${suffix}`;
-        window.print();
-        setTimeout(() => { document.title = prevTitle; }, 500);
-      };
-    };
-
-    renderView();
+    renderFormattedReportSheetView(container, snap.data(), null);
   } catch (err) {
     container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626;">載入報告失敗：${err?.message || err}</div>`;
   }
