@@ -1,0 +1,9 @@
+{
+  "name": "度尺批改 · 現場離線工作台",
+  "short_name": "度尺批改",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0F172A",
+  "orientation": "any"
+}
