@@ -399,38 +399,122 @@ export async function renderPublicShareReportView(container, token) {
       groups.get(sp).push(p);
     });
 
+    const flatOrderedPages = Array.from(groups.entries()).flatMap(([sp, items]) =>
+      items.map(pg => ({ ...pg, spaceTitle: sp }))
+    );
+
+    const pairedSheets = [];
+    for (let i = 0; i < flatOrderedPages.length; i += 2) {
+      pairedSheets.push(flatOrderedPages.slice(i, i + 2));
+    }
+
+    const currentShareUrl = window.location.href;
+    const waShareHref = `https://wa.me/?text=${encodeURIComponent(`${data.projectName || "工程"} - 現場度尺與審圖報告：${currentShareUrl}`)}`;
+
     container.innerHTML = `
-      <div style="max-width:980px; margin:0 auto; display:flex; flex-direction:column; gap:12px; padding-bottom:30px;">
-        <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:4px solid #0F172A;">
-          <div>
-            <div style="font-size:11px; color:#64748B; font-weight:700;">客戶專用唯讀報告</div>
-            <strong style="font-size:18px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
-            <div style="font-size:12px; color:#64748B; margin-top:2px;">共 ${pages.length} 張圖紙 · 更新時間：${dt}</div>
+      <style>
+        @page {
+          size: A4 portrait;
+          margin: 8mm;
+        }
+        @media print {
+          body, html {
+            background: #FFFFFF !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+          header, nav, .navbar, .topbar, .no-print {
+            display: none !important;
+          }
+          .rpt-root-wrap {
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            gap: 0 !important;
+          }
+          .rpt-a4-sheet {
+            height: 278mm !important;
+            max-height: 278mm !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: space-between !important;
+            gap: 4mm !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            box-sizing: border-box !important;
+            padding: 0 !important;
+            border: none !important;
+            box-shadow: none !important;
+            background: #FFFFFF !important;
+          }
+          .rpt-a4-sheet:last-child {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
+          .rpt-half-slot {
+            height: 136mm !important;
+            max-height: 136mm !important;
+            border: 1px solid #CBD5E1 !important;
+            border-radius: 6px !important;
+            padding: 6px 8px !important;
+            box-sizing: border-box !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+            background: #FFFFFF !important;
+          }
+          .rpt-half-img {
+            flex: 1 !important;
+            min-height: 0 !important;
+            max-height: 108mm !important;
+            width: 100% !important;
+            object-fit: contain !important;
+            border: none !important;
+          }
+        }
+      </style>
+
+      <div class="rpt-root-wrap" style="max-width:980px; margin:0 auto; display:flex; flex-direction:column; gap:12px; padding-bottom:30px;">
+        <div class="card no-print" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:4px solid #0F172A;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button type="button" id="rpt-view-back-btn" class="btn-outline btn-sm" style="font-weight:800;">‹ 退回</button>
+            <div>
+              <div style="font-size:11px; color:#64748B; font-weight:700;">客戶專用唯讀報告 · 預設 A4 垂直二合一</div>
+              <strong style="font-size:18px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
+              <div style="font-size:12px; color:#64748B; margin-top:2px;">共 ${pages.length} 張圖紙（自動排為 ${pairedSheets.length} 頁 A4 二合一）· 更新時間：${dt}</div>
+            </div>
           </div>
-          <button onclick="window.print()" class="btn-solid btn-sm">🖨️ 列印 / 儲存 PDF</button>
+
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            <a href="${waShareHref}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm"
+               style="text-decoration:none; color:#16A34A; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">
+              💬 WhatsApp 輸出
+            </a>
+            <button type="button" id="rpt-export-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
+              📥 輸出 PDF
+            </button>
+          </div>
         </div>
 
-        ${Array.from(groups.entries()).map(([sp, items]) => `
-          <div class="card" style="display:flex; flex-direction:column; gap:10px;">
-            <strong style="font-size:16px; color:#0F172A; border-bottom:1.5px solid #E2E8F0; padding-bottom:6px;">📍 ${sp}</strong>
-            ${items.map(pg => `
-              <div style="border:1px solid #E2E8F0; border-radius:8px; padding:10px; background:#F8FAFC; display:flex; flex-direction:column; gap:8px;">
-                <div style="font-weight:800; font-size:14px; color:#1E293B;">${pg.pageNum || ""} · ${pg.category || ""}</div>
-                ${pg.imageUrl ? `<img src="${pg.imageUrl}" style="width:100%; max-height:680px; object-fit:contain; background:#FFF; border:1px solid #E2E8F0; border-radius:6px;" />` : ""}
+        ${pairedSheets.map((pair, sheetIdx) => `
+          <div class="rpt-a4-sheet card" style="display:flex; flex-direction:column; gap:12px; padding:12px;">
+            ${pair.map(pg => `
+              <div class="rpt-half-slot" style="border:1px solid #E2E8F0; border-radius:8px; padding:10px; background:#F8FAFC; display:flex; flex-direction:column; gap:6px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:4px;">
+                  <strong style="font-size:14px; color:#0F172A;">📍 ${pg.spaceTitle} · ${pg.pageNum || ""} (${pg.category || ""})</strong>
+                  <span style="font-size:10px; color:#64748B;">${data.projectName || ""} · 第 ${sheetIdx + 1}/${pairedSheets.length} 頁</span>
+                </div>
+                ${pg.imageUrl ? `<img class="rpt-half-img" src="${pg.imageUrl}" style="width:100%; max-height:460px; object-fit:contain; background:#FFF; border:1px solid #E2E8F0; border-radius:6px;" />` : ""}
                 ${(pg.dimensions && pg.dimensions.length) ? `
-                  <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center;">
-                    <span style="font-size:12px; font-weight:800; color:#1D4ED8;">📐 尺寸標註：</span>
-                    ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:1px solid #BFDBFE; border-radius:5px; padding:2px 8px; font-size:12px; font-weight:700;">${d}</span>`).join("")}
+                  <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
+                    <span style="font-size:11px; font-weight:800; color:#1D4ED8;">📐 尺寸：</span>
+                    ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:1px solid #BFDBFE; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:700;">${d}</span>`).join("")}
                   </div>
                 ` : ""}
                 ${(pg.reviewLogs && pg.reviewLogs.length) ? `
-                  <div style="display:flex; flex-direction:column; gap:4px;">
-                    <span style="font-size:12px; font-weight:800; color:#991B1B;">📝 審圖確認事項：</span>
-                    ${pg.reviewLogs.map(r => `
-                      <div style="background:#FEF2F2; border:1px solid #FECACA; color:#991B1B; border-radius:5px; padding:4px 8px; font-size:12px; font-weight:700;">
-                        ${r.note}
-                      </div>
-                    `).join("")}
+                  <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
+                    <span style="font-size:11px; font-weight:800; color:#991B1B;">📝 確認：</span>
+                    ${pg.reviewLogs.map(r => `<span style="background:#FEF2F2; border:1px solid #FECACA; color:#991B1B; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:700;">${r.note}</span>`).join("")}
                   </div>
                 ` : ""}
               </div>
@@ -439,6 +523,23 @@ export async function renderPublicShareReportView(container, token) {
         `).join("")}
       </div>
     `;
+
+    container.querySelector("#rpt-view-back-btn").onclick = () => {
+      if (window.opener && !window.opener.closed) {
+        window.close();
+      } else if (window.history.length > 1) {
+        window.history.back();
+      } else {
+        window.location.href = window.location.origin + window.location.pathname;
+      }
+    };
+
+    container.querySelector("#rpt-export-pdf-btn").onclick = () => {
+      const prevTitle = document.title;
+      document.title = `${data.projectName || "度尺報告"}_垂直二合一`;
+      window.print();
+      setTimeout(() => { document.title = prevTitle; }, 500);
+    };
   } catch (err) {
     container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626;">載入報告失敗：${err?.message || err}</div>`;
   }
