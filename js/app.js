@@ -586,6 +586,241 @@ function openQuickReassignModal(page, projectSpaces, onUpdated) {
   renderBox();
 }
 
+function guessSpaceAndCategoryFromFilename(filename, availableSpaces) {
+  const base = String(filename || "").replace(/\.[^.]+$/, "");
+  let detectedCat = "度尺圖";
+  if (/平面/.test(base)) detectedCat = "平面圖";
+  else if (/效果|渲染|3D圖/i.test(base)) detectedCat = "效果圖";
+  else if (/繪圖|立體|詳圖|立面|大樣/.test(base)) detectedCat = "繪圖";
+  else if (/度尺|實測|現場/.test(base)) detectedCat = "度尺圖";
+
+  let detectedSpace = "";
+  const sortedSpaces = [...availableSpaces].sort((a, b) => b.length - a.length);
+  for (const sp of sortedSpaces) {
+    if (sp && sp !== "未標空間" && base.includes(sp)) {
+      detectedSpace = sp;
+      break;
+    }
+  }
+  return { detectedSpace, detectedCat, cleanBase: base };
+}
+
+function openBatchUploadModal(projectSpaces, onCompleted) {
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = "image/*";
+  picker.multiple = true;
+
+  picker.onchange = () => {
+    const files = Array.from(picker.files || []);
+    if (!files.length) return;
+
+    const allSpaceOptions = [...new Set([...projectSpaces, ...cloudPresetSpaces])].filter(s => s && s !== "未標空間");
+    const defaultSpace = allSpaceOptions[0] || "總圖";
+
+    const items = files.map((file, idx) => {
+      const { detectedSpace, detectedCat } = guessSpaceAndCategoryFromFilename(file.name, allSpaceOptions);
+      return {
+        id: `batch_${Date.now()}_${idx}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        space: detectedSpace || defaultSpace,
+        category: detectedCat
+      };
+    });
+
+    const existing = document.getElementById("batch-upload-modal");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "batch-upload-modal";
+    overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.62); display:flex; align-items:center; justify-content:center; z-index:1300; padding:10px;";
+
+    const cleanupUrls = () => items.forEach(it => URL.revokeObjectURL(it.previewUrl));
+
+    const renderModal = () => {
+      overlay.innerHTML = `
+        <div style="width:min(760px, 97vw); max-height:90vh; background:#FFFFFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 45px rgba(0,0,0,0.35);">
+          <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:8px;">
+            <div>
+              <strong style="font-size:16px; color:#0F172A;">📤 批量上底圖（已選 ${items.length} 張）</strong>
+              <div style="font-size:11px; color:#64748B; margin-top:2px;">已自動識別檔名中的空間與分類，可逐張微調或一鍵統一套用</div>
+            </div>
+            <button type="button" id="bum-close" class="btn-outline btn-sm">取消</button>
+          </div>
+
+          <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:7px 9px;">
+            <span style="font-size:12px; font-weight:800; color:#334155;">全部統一改為：</span>
+            <select id="bum-all-space" style="padding:4px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700;">
+              ${allSpaceOptions.map(sp => `<option value="${sp}">${sp}</option>`).join("")}
+            </select>
+            <button type="button" id="bum-apply-all-space" class="btn-outline btn-sm" style="font-size:11px;">套用空間至全部</button>
+
+            <select id="bum-all-cat" style="padding:4px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; margin-left:4px;">
+              ${CORE_CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join("")}
+            </select>
+            <button type="button" id="bum-apply-all-cat" class="btn-outline btn-sm" style="font-size:11px;">套用分類至全部</button>
+
+            <button type="button" id="bum-add-more" class="btn-outline btn-sm" style="margin-left:auto; color:#1D4ED8; border-color:#93C5FD; font-weight:800;">+ 繼續加選圖片</button>
+          </div>
+
+          <div style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:6px; padding-right:2px;">
+            ${items.map((it, idx) => `
+              <div style="display:flex; align-items:center; gap:8px; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:8px; padding:6px 8px; flex-wrap:wrap;">
+                <img src="${it.previewUrl}" style="width:54px; height:42px; object-fit:contain; border:1px solid #E2E8F0; border-radius:4px; background:#F8FAFC; flex-shrink:0;" />
+                <div style="flex:1; min-width:130px; overflow:hidden;">
+                  <div style="font-size:12px; font-weight:800; color:#0F172A; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                    #${idx + 1} · ${it.file.name}
+                  </div>
+                  <div style="font-size:10px; color:#64748B;">${(it.file.size / 1024).toFixed(0)} KB</div>
+                </div>
+
+                <select class="bum-item-space" data-bidx="${idx}" style="padding:4px 6px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; color:#0F172A;">
+                  ${allSpaceOptions.map(sp => `<option value="${sp}" ${it.space === sp ? "selected" : ""}>${sp}</option>`).join("")}
+                </select>
+
+                <div style="display:inline-flex; gap:3px;">
+                  ${CORE_CATEGORIES.map(c => `
+                    <button type="button" class="bum-item-cat" data-bidx="${idx}" data-bcat="${c}"
+                            style="padding:3px 6px; border-radius:5px; font-size:11px; font-weight:800; cursor:pointer; border:1px solid ${it.category === c ? "#2563EB" : "#CBD5E1"}; background:${it.category === c ? "#DBEAFE" : "#F8FAFC"}; color:${it.category === c ? "#1D4ED8" : "#475569"};">
+                      ${c}
+                    </button>
+                  `).join("")}
+                </div>
+
+                <button type="button" class="bum-item-del" data-bidx="${idx}" title="移除此張"
+                        style="background:none; border:none; color:#DC2626; font-size:14px; font-weight:800; cursor:pointer; padding:2px 5px;">✕</button>
+              </div>
+            `).join("")}
+          </div>
+
+          <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #E2E8F0; padding-top:8px; gap:8px;">
+            <span id="bum-progress-text" style="font-size:12px; font-weight:700; color:#059669;"></span>
+            <div style="display:flex; gap:6px;">
+              <button type="button" id="bum-cancel-btn" class="btn-outline btn-sm">取消</button>
+              <button type="button" id="bum-confirm-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
+                ✅ 確認批量匯入（${items.length} 張）
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const closeAll = () => {
+        cleanupUrls();
+        overlay.remove();
+      };
+      overlay.querySelector("#bum-close").onclick = closeAll;
+      overlay.querySelector("#bum-cancel-btn").onclick = closeAll;
+
+      overlay.querySelector("#bum-apply-all-space").onclick = () => {
+        const val = overlay.querySelector("#bum-all-space").value;
+        items.forEach(it => { it.space = val; });
+        renderModal();
+      };
+
+      overlay.querySelector("#bum-apply-all-cat").onclick = () => {
+        const val = overlay.querySelector("#bum-all-cat").value;
+        items.forEach(it => { it.category = val; });
+        renderModal();
+      };
+
+      overlay.querySelector("#bum-add-more").onclick = () => {
+        const extraPicker = document.createElement("input");
+        extraPicker.type = "file";
+        extraPicker.accept = "image/*";
+        extraPicker.multiple = true;
+        extraPicker.onchange = () => {
+          const extraFiles = Array.from(extraPicker.files || []);
+          extraFiles.forEach((f, i) => {
+            const { detectedSpace, detectedCat } = guessSpaceAndCategoryFromFilename(f.name, allSpaceOptions);
+            items.push({
+              id: `batch_${Date.now()}_${items.length}_${i}`,
+              file: f,
+              previewUrl: URL.createObjectURL(f),
+              space: detectedSpace || defaultSpace,
+              category: detectedCat
+            });
+          });
+          renderModal();
+        };
+        extraPicker.click();
+      };
+
+      overlay.querySelectorAll(".bum-item-space").forEach(sel => {
+        sel.onchange = () => {
+          items[Number(sel.dataset.bidx)].space = sel.value;
+        };
+      });
+
+      overlay.querySelectorAll(".bum-item-cat").forEach(btn => {
+        btn.onclick = () => {
+          items[Number(btn.dataset.bidx)].category = btn.dataset.bcat;
+          renderModal();
+        };
+      });
+
+      overlay.querySelectorAll(".bum-item-del").forEach(btn => {
+        btn.onclick = () => {
+          const idx = Number(btn.dataset.bidx);
+          URL.revokeObjectURL(items[idx].previewUrl);
+          items.splice(idx, 1);
+          if (!items.length) closeAll();
+          else renderModal();
+        };
+      });
+
+      overlay.querySelector("#bum-confirm-btn").onclick = async () => {
+        if (!items.length) return;
+        const confirmBtn = overlay.querySelector("#bum-confirm-btn");
+        const progText = overlay.querySelector("#bum-progress-text");
+        confirmBtn.disabled = true;
+
+        if (!Array.isArray(currentProject.pages)) currentProject.pages = [];
+        const baseTs = Date.now();
+
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          progText.textContent = `⏳ 正在儲存第 ${i + 1} / ${items.length} 張（${it.space} · ${it.category}）...`;
+          confirmBtn.textContent = `匯入中 (${i + 1}/${items.length})...`;
+
+          const pageNum = `P${currentProject.pages.length + 1}`;
+          const newPage = {
+            id: `PG_${baseTs}_${i}`,
+            pageNum,
+            space: it.space,
+            docTypeLabel: it.category,
+            title: `${it.space} · ${it.category}`,
+            sitePhotoUrl: "",
+            lines: [],
+            markers: [],
+            paths: [],
+            arrows: [],
+            stickers: [],
+            overlays: [],
+            reviewLogs: []
+          };
+
+          const savedUrl = await savePhotoOfflineFirst(currentProject.id, newPage, it.file);
+          newPage.sitePhotoUrl = savedUrl;
+          memoryPhotoCache.set(newPage.id, savedUrl);
+          currentProject.pages.push(newPage);
+        }
+
+        progText.textContent = `💾 正在更新工程目錄...`;
+        await saveCurrentProject();
+        closeAll();
+        if (typeof onCompleted === "function") onCompleted();
+      };
+    };
+
+    document.body.appendChild(overlay);
+    renderModal();
+  };
+
+  picker.click();
+}
+
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -1153,7 +1388,6 @@ async function ensureSinglePagePhoto(proj, page) {
     return page.sitePhotoUrl;
   }
 
-  // 1. 優先從本機 IndexedDB 圖庫讀取（斷網無訊號也能秒開）
   const lookupKey = page.mediaRefId ? String(page.mediaRefId) : `PAGE_${page.id}`;
   const idbData = await idbGetMedia(lookupKey);
   if (idbData) {
@@ -1164,7 +1398,6 @@ async function ensureSinglePagePhoto(proj, page) {
 
   if (!navigator.onLine) return "";
 
-  // 2. 線上從 Firebase 下載並自動存入本機 IndexedDB
   if (page.mediaRefId) {
     try {
       const mDoc = await getDoc(doc(db, MEDIA_COL, String(page.mediaRefId)));
@@ -1389,6 +1622,7 @@ function renderOverview() {
                 style="background:none; border:1px solid #E2E8F0; border-radius:5px; padding:1px 5px; font-size:11px; color:#64748B; cursor:pointer;">✏️</button>
       </div>
       <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-batch-upload-base" class="btn-solid btn-sm" style="background:#2563EB; border-color:#2563EB;">📤 批量上底圖</button>
         <button id="btn-offline-cache-all" class="btn-outline btn-sm" style="color:#059669; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">📥 離線備份圖庫</button>
         <button id="btn-cloud-dict-open" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">⚙️ 雲端詞庫</button>
         <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#FCA5A5; color:#DC2626; font-weight:700;">
@@ -1447,7 +1681,7 @@ function renderOverview() {
 
     <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}" style="margin-bottom:8px;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <div class="section-title" style="margin:0;">第一步：點選空間</div>
+        <div class="section-title" style="margin:0;">第一步：點選空間（或直接按右上方「📤 批量上底圖」）</div>
         <button id="btn-picker-manage-sp" class="btn-outline btn-sm" style="font-size:11px;">⚙️ 加減預設空間</button>
       </div>
       <div class="chip-grid" id="picker-spaces" style="margin-bottom:8px;"></div>
@@ -1481,6 +1715,10 @@ function renderOverview() {
   document.getElementById("btn-cloud-dict-open").onclick = () => openCloudDictModal("STAMP");
   document.getElementById("btn-preset-space-gear").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
   document.getElementById("btn-picker-manage-sp").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
+
+  document.getElementById("btn-batch-upload-base").onclick = () => {
+    openBatchUploadModal(allSpaces, () => renderOverview());
+  };
 
   document.getElementById("btn-offline-cache-all").onclick = async () => {
     const btn = document.getElementById("btn-offline-cache-all");
@@ -1935,7 +2173,6 @@ async function renderSinglePageEditor(page) {
         <button type="button" id="btn-close-space-strip" style="flex-shrink:0; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:4px 8px; font-size:11px; color:#475569; cursor:pointer;">收起 ▴</button>
       </div>
 
-      <!-- 全屏拉高版「📝 本頁審圖批改記錄」抽屜面板 -->
       <div id="page-review-drawer" class="hidden" style="position:absolute; right:10px; top:42px; bottom:10px; width:min(410px, 95vw); height:calc(100vh - 54px); background:#FFFFFF; color:#0F172A; border:1.5px solid #CBD5E1; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(15,23,42,0.22); z-index:40; display:flex; flex-direction:column; gap:7px;">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:5px;">
           <strong style="font-size:14px; color:#0F172A;">📝 本頁審圖批改記錄</strong>
