@@ -1773,16 +1773,49 @@ function renderOverview() {
     createAndOpenNewPage(targetSp, { docType: "度尺圖", withWhitePaper: true });
   };
 
-  document.getElementById("btn-offline-cache-all").onclick = async () => {
+document.getElementById("btn-offline-cache-all").onclick = async () => {
     const btn = document.getElementById("btn-offline-cache-all");
     btn.disabled = true;
     await idbSaveProject(currentProject);
+    let syncedCloudCnt = 0;
+
+    const shrinkIfNeeded = (dataUrl) => new Promise((resolve) => {
+      if (!dataUrl || dataUrl.length < 750000) { resolve(dataUrl); return; }
+      const img = new Image();
+      img.onload = () => {
+        const sc = Math.min(1, 1280 / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * sc);
+        c.height = Math.round(img.height * sc);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.72));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+
     for (let i = 0; i < pages.length; i++) {
-      btn.textContent = `⏳ 下載離線包 (${i + 1}/${pages.length})...`;
-      await ensureSinglePagePhoto(currentProject, pages[i]);
+      const pg = pages[i];
+      btn.textContent = `⏳ 備份並上雲 (${i + 1}/${pages.length})...`;
+      const rawUrl = await ensureSinglePagePhoto(currentProject, pg);
+      if (rawUrl && navigator.onLine) {
+        const safeUrl = await shrinkIfNeeded(rawUrl);
+        pg.sitePhotoUrl = safeUrl;
+        memoryPhotoCache.set(pg.id, safeUrl);
+        const refId = pg.mediaRefId || `M_${currentProject.id}_${pg.id}`;
+        pg.mediaRefId = refId;
+        await idbSaveMedia(refId, safeUrl, { projectId: currentProject.id, pageId: pg.id });
+        await setDoc(doc(db, MEDIA_COL, String(refId)), {
+          projectId: currentProject.id,
+          pageId: pg.id,
+          imageData: safeUrl,
+          updatedAt: Date.now()
+        }).then(() => { syncedCloudCnt++; }).catch(() => {});
+      }
     }
+    await saveCurrentProject();
     btn.disabled = false;
-    btn.textContent = `✅ 全套已離線備份 (${pages.length}張)`;
+    btn.textContent = `✅ 已備份並上雲 (${syncedCloudCnt}/${pages.length}張)`;
   };
 
   document.getElementById("btn-overview-contact").onclick = () => document.getElementById("overview-contact-box").classList.toggle("hidden");
@@ -1811,6 +1844,9 @@ function renderOverview() {
     board.classList.toggle("hidden");
     if (!board.classList.contains("hidden")) renderProjectReviewList();
   };
+
+
+  
   document.getElementById("btn-close-review-board").onclick = () => document.getElementById("project-review-board").classList.add("hidden");
 
   document.getElementById("btn-space-sort-toggle").onclick = () => document.getElementById("space-sort-drawer").classList.toggle("hidden");
