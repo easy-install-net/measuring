@@ -381,7 +381,7 @@ export function renderReportBuilder(container, project, onBack) {
 }
 
 export async function renderPublicShareReportView(container, token) {
-  container.innerHTML = `<div class="card" style="text-align:center; padding:40px; font-size:15px;">正在載入客戶專用現場度尺與審圖報告...</div>`;
+  container.innerHTML = `<div class="card" style="text-align:center; padding:40px; font-size:15px;">正在載入現場度尺與審圖報告...</div>`;
   try {
     const snap = await getDoc(doc(db, REPORT_COL, String(token)));
     if (!snap.exists()) {
@@ -408,138 +408,162 @@ export async function renderPublicShareReportView(container, token) {
       pairedSheets.push(flatOrderedPages.slice(i, i + 2));
     }
 
-    const currentShareUrl = window.location.href;
-    const waShareHref = `https://wa.me/?text=${encodeURIComponent(`${data.projectName || "工程"} - 現場度尺與審圖報告：${currentShareUrl}`)}`;
+    let layoutMode = "PORTRAIT_2IN1"; // "PORTRAIT_2IN1" | "LANDSCAPE_1IN1"
 
-    container.innerHTML = `
-      <style>
-        @page {
-          size: A4 portrait;
-          margin: 8mm;
-        }
-        @media print {
-          body, html {
-            background: #FFFFFF !important;
-            margin: 0 !important;
-            padding: 0 !important;
-          }
-          header, nav, .navbar, .topbar, .no-print {
-            display: none !important;
-          }
-          .rpt-root-wrap {
-            max-width: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            gap: 0 !important;
-          }
-          .rpt-a4-sheet {
-            height: 278mm !important;
-            max-height: 278mm !important;
-            display: flex !important;
-            flex-direction: column !important;
-            justify-content: space-between !important;
-            gap: 4mm !important;
-            page-break-after: always !important;
-            break-after: page !important;
-            box-sizing: border-box !important;
-            padding: 0 !important;
-            border: none !important;
-            box-shadow: none !important;
-            background: #FFFFFF !important;
-          }
-          .rpt-a4-sheet:last-child {
-            page-break-after: auto !important;
-            break-after: auto !important;
-          }
-          .rpt-half-slot {
-            height: 136mm !important;
-            max-height: 136mm !important;
-            border: 1px solid #CBD5E1 !important;
-            border-radius: 6px !important;
-            padding: 6px 8px !important;
-            box-sizing: border-box !important;
-            display: flex !important;
-            flex-direction: column !important;
-            overflow: hidden !important;
-            background: #FFFFFF !important;
-          }
-          .rpt-half-img {
-            flex: 1 !important;
-            min-height: 0 !important;
-            max-height: 108mm !important;
-            width: 100% !important;
-            object-fit: contain !important;
-            border: none !important;
-          }
-        }
-      </style>
+    const renderView = () => {
+      const isLandscape = layoutMode === "LANDSCAPE_1IN1";
+      const sheets = isLandscape
+        ? flatOrderedPages.map(pg => [pg])
+        : pairedSheets;
 
-      <div class="rpt-root-wrap" style="max-width:980px; margin:0 auto; display:flex; flex-direction:column; gap:12px; padding-bottom:30px;">
-        <div class="card no-print" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:4px solid #0F172A;">
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-            <button type="button" id="rpt-view-back-btn" class="btn-outline btn-sm" style="font-weight:800;">‹ 退回</button>
-            <div>
-              <div style="font-size:11px; color:#64748B; font-weight:700;">客戶專用唯讀報告 · 預設 A4 垂直二合一</div>
-              <strong style="font-size:18px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
-              <div style="font-size:12px; color:#64748B; margin-top:2px;">共 ${pages.length} 張圖紙（自動排為 ${pairedSheets.length} 頁 A4 二合一）· 更新時間：${dt}</div>
+      container.innerHTML = `
+        <style>
+          @page {
+            size: ${isLandscape ? "A4 landscape" : "A4 portrait"};
+            margin: 3mm;
+          }
+          @media print {
+            body, html {
+              background: #FFFFFF !important;
+              margin: 0 !important;
+              padding: 0 !important;
+            }
+            header, nav, .navbar, .topbar, .no-print {
+              display: none !important;
+            }
+            .rpt-root-wrap {
+              max-width: 100% !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              gap: 0 !important;
+            }
+            .rpt-a4-sheet {
+              height: ${isLandscape ? "202mm" : "289mm"} !important;
+              max-height: ${isLandscape ? "202mm" : "289mm"} !important;
+              display: flex !important;
+              flex-direction: column !important;
+              justify-content: space-between !important;
+              gap: 2mm !important;
+              page-break-after: always !important;
+              break-after: page !important;
+              box-sizing: border-box !important;
+              padding: 0 !important;
+              border: none !important;
+              box-shadow: none !important;
+              background: #FFFFFF !important;
+            }
+            .rpt-a4-sheet:last-child {
+              page-break-after: auto !important;
+              break-after: auto !important;
+            }
+            .rpt-half-slot {
+              height: ${isLandscape ? "201mm" : "143mm"} !important;
+              max-height: ${isLandscape ? "201mm" : "143mm"} !important;
+              border: 0.5pt solid #CBD5E1 !important;
+              border-radius: 3px !important;
+              padding: 3px 5px !important;
+              box-sizing: border-box !important;
+              display: flex !important;
+              flex-direction: column !important;
+              overflow: hidden !important;
+              background: #FFFFFF !important;
+            }
+            .rpt-half-img {
+              flex: 1 !important;
+              min-height: 0 !important;
+              max-height: ${isLandscape ? "184mm" : "126mm"} !important;
+              width: 100% !important;
+              object-fit: contain !important;
+              border: none !important;
+            }
+          }
+        </style>
+
+        <div class="rpt-root-wrap" style="max-width:1040px; margin:0 auto; display:flex; flex-direction:column; gap:10px; padding-bottom:30px;">
+          <div class="card no-print" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-top:3px solid #0F172A; padding:10px 12px;">
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+              <button type="button" id="rpt-view-close-btn" class="btn-outline btn-sm" style="font-weight:800;">✕ 關閉</button>
+              <div>
+                <strong style="font-size:16px; color:#0F172A;">${data.projectName || "現場度尺與審圖報告"}</strong>
+                <div style="font-size:11px; color:#64748B; margin-top:1px;">
+                  共 ${pages.length} 張圖紙 · 排為 ${sheets.length} 頁 PDF（極幼邊框）· ${dt}
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+              <div style="display:inline-flex; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:2px;">
+                <button type="button" id="rpt-mode-portrait"
+                        style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${!isLandscape ? "#0F172A" : "transparent"}; color:${!isLandscape ? "#FFF" : "#475569"};">
+                  📄 直向 2合1
+                </button>
+                <button type="button" id="rpt-mode-landscape"
+                        style="border:none; border-radius:4px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer; background:${isLandscape ? "#0F172A" : "transparent"}; color:${isLandscape ? "#FFF" : "#475569"};">
+                  🖼️ 橫向 一張一頁
+                </button>
+              </div>
+
+              <button type="button" id="rpt-export-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
+                📥 輸出 PDF
+              </button>
             </div>
           </div>
 
-          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-            <a href="${waShareHref}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm"
-               style="text-decoration:none; color:#16A34A; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">
-              💬 WhatsApp 輸出
-            </a>
-            <button type="button" id="rpt-export-pdf-btn" class="btn-solid btn-sm" style="background:#0F172A; border-color:#0F172A;">
-              📥 輸出 PDF
-            </button>
-          </div>
-        </div>
-
-        ${pairedSheets.map((pair, sheetIdx) => `
-          <div class="rpt-a4-sheet card" style="display:flex; flex-direction:column; gap:12px; padding:12px;">
-            ${pair.map(pg => `
-              <div class="rpt-half-slot" style="border:1px solid #E2E8F0; border-radius:8px; padding:10px; background:#F8FAFC; display:flex; flex-direction:column; gap:6px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:4px;">
-                  <strong style="font-size:14px; color:#0F172A;">📍 ${pg.spaceTitle} · ${pg.pageNum || ""} (${pg.category || ""})</strong>
-                  <span style="font-size:10px; color:#64748B;">${data.projectName || ""} · 第 ${sheetIdx + 1}/${pairedSheets.length} 頁</span>
+          ${sheets.map((pair, sheetIdx) => `
+            <div class="rpt-a4-sheet card" style="display:flex; flex-direction:column; gap:8px; padding:8px; border:1px solid #E2E8F0;">
+              ${pair.map(pg => `
+                <div class="rpt-half-slot" style="border:1px solid #CBD5E1; border-radius:4px; padding:5px 7px; background:#FFFFFF; display:flex; flex-direction:column; gap:4px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:0.5pt solid #E2E8F0; padding-bottom:2px;">
+                    <strong style="font-size:12px; color:#0F172A;">📍 ${pg.spaceTitle} · ${pg.pageNum || ""} (${pg.category || ""})</strong>
+                    <span style="font-size:10px; color:#64748B;">${data.projectName || ""} · ${sheetIdx + 1}/${sheets.length}</span>
+                  </div>
+                  ${pg.imageUrl ? `<img class="rpt-half-img" src="${pg.imageUrl}" style="width:100%; max-height:${isLandscape ? "640px" : "460px"}; object-fit:contain; background:#FFF;" />` : ""}
+                  ${(pg.dimensions && pg.dimensions.length) ? `
+                    <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
+                      <span style="font-size:10px; font-weight:800; color:#1D4ED8;">📐 尺寸：</span>
+                      ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:0.5pt solid #BFDBFE; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${d}</span>`).join("")}
+                    </div>
+                  ` : ""}
+                  ${(pg.reviewLogs && pg.reviewLogs.length) ? `
+                    <div style="display:flex; flex-wrap:wrap; gap:3px; align-items:center;">
+                      <span style="font-size:10px; font-weight:800; color:#991B1B;">📝 確認：</span>
+                      ${pg.reviewLogs.map(r => `<span style="background:#FEF2F2; border:0.5pt solid #FECACA; color:#991B1B; border-radius:3px; padding:0 5px; font-size:10px; font-weight:700;">${r.note}</span>`).join("")}
+                    </div>
+                  ` : ""}
                 </div>
-                ${pg.imageUrl ? `<img class="rpt-half-img" src="${pg.imageUrl}" style="width:100%; max-height:460px; object-fit:contain; background:#FFF; border:1px solid #E2E8F0; border-radius:6px;" />` : ""}
-                ${(pg.dimensions && pg.dimensions.length) ? `
-                  <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
-                    <span style="font-size:11px; font-weight:800; color:#1D4ED8;">📐 尺寸：</span>
-                    ${pg.dimensions.map(d => `<span style="background:#EFF6FF; color:#1E40AF; border:1px solid #BFDBFE; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:700;">${d}</span>`).join("")}
-                  </div>
-                ` : ""}
-                ${(pg.reviewLogs && pg.reviewLogs.length) ? `
-                  <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">
-                    <span style="font-size:11px; font-weight:800; color:#991B1B;">📝 確認：</span>
-                    ${pg.reviewLogs.map(r => `<span style="background:#FEF2F2; border:1px solid #FECACA; color:#991B1B; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:700;">${r.note}</span>`).join("")}
-                  </div>
-                ` : ""}
-              </div>
-            `).join("")}
-          </div>
-        `).join("")}
-      </div>
-    `;
+              `).join("")}
+            </div>
+          `).join("")}
+        </div>
+      `;
 
-    container.querySelector("#rpt-view-back-btn").onclick = () => {
-      if (window.opener && !window.opener.closed) {
+      container.querySelector("#rpt-mode-portrait").onclick = () => {
+        layoutMode = "PORTRAIT_2IN1";
+        renderView();
+      };
+      container.querySelector("#rpt-mode-landscape").onclick = () => {
+        layoutMode = "LANDSCAPE_1IN1";
+        renderView();
+      };
+
+      container.querySelector("#rpt-view-close-btn").onclick = () => {
         window.close();
-      } else if (window.history.length > 1) {
-        window.history.back();
-      } else {
-        window.location.href = window.location.origin + window.location.pathname;
-      }
+        setTimeout(() => {
+          if (window.history.length > 1) window.history.back();
+          else window.location.href = window.location.origin + window.location.pathname;
+        }, 120);
+      };
+
+      container.querySelector("#rpt-export-pdf-btn").onclick = () => {
+        const prevTitle = document.title;
+        const suffix = isLandscape ? "橫向一張一頁" : "直向2合1";
+        document.title = `${data.projectName || "度尺報告"}_${suffix}`;
+        window.print();
+        setTimeout(() => { document.title = prevTitle; }, 500);
+      };
     };
 
-    container.querySelector("#rpt-export-pdf-btn").onclick = () => {
-      const prevTitle = document.title;
-      document.title = `${data.projectName || "度尺報告"}_垂直二合一`;
-      window.print();
-      setTimeout(() => { document.title = prevTitle; }, 500);
-    };
+    renderView();
   } catch (err) {
     container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626;">載入報告失敗：${err?.message || err}</div>`;
   }
