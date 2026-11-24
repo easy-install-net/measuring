@@ -38,12 +38,10 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
 
-  // 跳過 Firestore 動態 API 請求，交由前端 IndexedDB 離線機制處理
   if (url.hostname.includes("googleapis.com") && url.pathname.includes("/google.firestore")) {
     return;
   }
 
-  // 同源資源與 Firebase SDK：網路優先，斷網自動無縫切換本機快取
   if (url.origin === self.location.origin || url.hostname.includes("gstatic.com")) {
     event.respondWith(
       fetch(req)
