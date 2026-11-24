@@ -1,8 +1,8 @@
 const ARROW_STATUS_BUTTONS = [
-  { key: "OK", label: "✅ 確認", bg: "#DCFCE7", fg: "#166534", border: "#86EFAC" },
-  { key: "NEED_FIX", label: "❌ 需改", bg: "#FEE2E2", fg: "#991B1B", border: "#FCA5A5" },
-  { key: "SITE_CHECK", label: "⚠️ 再核對", bg: "#FEF3C7", fg: "#92400E", border: "#FCD34D" },
-  { key: "NEED_INFO", label: "📌 待補資料", bg: "#DBEAFE", fg: "#1E40AF", border: "#93C5FD" }
+  { key: "OK", label: "確認", bg: "#DCFCE7", fg: "#166534", border: "#86EFAC" },
+  { key: "NEED_FIX", label: "需改", bg: "#FEE2E2", fg: "#991B1B", border: "#FCA5A5" },
+  { key: "SITE_CHECK", label: "再核對", bg: "#FEF3C7", fg: "#92400E", border: "#FCD34D" },
+  { key: "NEED_INFO", label: "待補資料", bg: "#DBEAFE", fg: "#1E40AF", border: "#93C5FD" }
 ];
 
 const RULER_QUICK_WORDS = ["闊", "高", "深", "凹", "凸", "外計", "內計"];
@@ -46,11 +46,12 @@ export class MeasureCanvas {
     this.navOpts = navOpts;
 
     this.mode = "VIEW";
+    this.multiSelectMode = false;
     this.activeColor = this.colors[0] || "#DC2626";
     this.strokeWidth = 1.5;
     this.fontSize = 18;
     this.whiteBg = false;
-    this.selectedItem = null;
+    this.selectedItems = []; // [{ type, index }]
     this.undoStack = [];
 
     this.scale = 1;
@@ -61,7 +62,8 @@ export class MeasureCanvas {
     this.panStart = { x: 0, y: 0 };
     this.isDrawing = false;
     this.draftObj = null;
-    this.dragTarget = null;
+    this.dragGroupState = null;
+    this.marqueeRect = null;
     this.lastTapTime = 0;
     this.lastTapPos = null;
     this.pinchDist = 0;
@@ -85,6 +87,21 @@ export class MeasureCanvas {
 
     this.buildDOM();
     this.bindEvents();
+  }
+
+  isItemSelected(type, index) {
+    return this.selectedItems.some(s => s.type === type && s.index === index);
+  }
+
+  setSingleSelection(item) {
+    this.selectedItems = item ? [item] : [];
+  }
+
+  toggleSelectionItem(item) {
+    if (!item) return;
+    const idx = this.selectedItems.findIndex(s => s.type === item.type && s.index === item.index);
+    if (idx >= 0) this.selectedItems.splice(idx, 1);
+    else this.selectedItems.push(item);
   }
 
   isAnyEditorOpen() {
@@ -130,7 +147,7 @@ export class MeasureCanvas {
       const targetH = targetW * ratio;
       this.overlays.push({ x: baseW * 0.5, y: baseH * 0.5, w: targetW, h: targetH, src: dataUrl });
       this.overlayImageCache.set(dataUrl, img);
-      this.selectedItem = { type: "overlay", index: this.overlays.length - 1 };
+      this.setSingleSelection({ type: "overlay", index: this.overlays.length - 1 });
       this.setMode("SELECT");
       this.updateNearToolbar();
       this.emitSave();
@@ -139,12 +156,8 @@ export class MeasureCanvas {
     img.src = dataUrl;
   }
 
-  async flattenItemIntoBase(targetItem) {
-    if (!targetItem) return;
-    const { type, index } = targetItem;
-    const obj = this.getObjectByTypeAndIndex(type, index);
-    if (!obj) return;
-
+  async flattenSelectedItemsIntoBase() {
+    if (!this.selectedItems.length) return;
     this.pushUndoSnapshot();
 
     const baseW = this.bgImg?.naturalWidth || 1600;
@@ -163,88 +176,97 @@ export class MeasureCanvas {
 
     const renderScale = Math.max(0.2, this.scale || 1);
 
-    if (type === "overlay") {
-      const im = this.getOverlayImageElement(obj.src);
-      if (im && im.complete && im.naturalWidth) {
+    for (const targetItem of this.selectedItems) {
+      const { type, index } = targetItem;
+      const obj = this.getObjectByTypeAndIndex(type, index);
+      if (!obj) continue;
+
+      if (type === "overlay") {
+        const im = this.getOverlayImageElement(obj.src);
+        if (im && im.complete && im.naturalWidth) {
+          octx.save();
+          octx.drawImage(im, obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
+          octx.strokeStyle = "#94A3B8";
+          octx.lineWidth = 3;
+          octx.strokeRect(obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
+          octx.restore();
+        }
+      } else if (type === "marker") {
+        const fs = (obj.fontSize || 18) / renderScale;
         octx.save();
-        octx.drawImage(im, obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
-        octx.strokeStyle = "#94A3B8";
-        octx.lineWidth = 3;
-        octx.strokeRect(obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
+        octx.font = `800 ${fs}px sans-serif`;
+        const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
+        const padX = 6 / renderScale;
+        const padY = 4 / renderScale;
+        const w = wText + padX * 2;
+        const h = fs + padY * 2;
+        octx.fillStyle = "rgba(255,255,255,0.82)";
+        octx.beginPath();
+        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
+        octx.fill();
+        octx.textAlign = "center";
+        octx.textBaseline = "middle";
+        octx.fillStyle = obj.color || "#DC2626";
+        octx.fillText(obj.text || "", obj.x, obj.y);
+        octx.restore();
+      } else if (type === "sticker") {
+        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 15, 0.78, renderScale);
+      } else if (type === "line") {
+        octx.save();
+        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        octx.strokeStyle = obj.color || "#2563EB";
+        octx.lineWidth = sw;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x2, obj.y2);
+        octx.stroke();
+        if (obj.text) {
+          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 15, 0.9, renderScale);
+        }
+        octx.restore();
+      } else if (type === "arrow") {
+        octx.save();
+        const col = obj.color || "#DC2626";
+        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        octx.strokeStyle = col;
+        octx.fillStyle = col;
+        octx.lineWidth = sw;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x2, obj.y2);
+        octx.stroke();
+        const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
+        const headLen = 12 / renderScale;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
+        octx.lineTo(obj.x1 - headLen * Math.cos(ang + Math.PI / 6), obj.y1 - headLen * Math.sin(ang + Math.PI / 6));
+        octx.closePath();
+        octx.fill();
+        if (obj.text) {
+          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 16, 0.8, renderScale);
+        }
+        octx.restore();
+      } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
+        octx.save();
+        octx.strokeStyle = obj.color || "#DC2626";
+        octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
+        octx.lineCap = "round";
+        octx.lineJoin = "round";
+        octx.beginPath();
+        octx.moveTo(obj.points[0].x, obj.points[0].y);
+        for (let i = 1; i < obj.points.length; i++) octx.lineTo(obj.points[i].x, obj.points[i].y);
+        octx.stroke();
         octx.restore();
       }
-    } else if (type === "marker") {
-      const fs = (obj.fontSize || 18) / renderScale;
-      octx.save();
-      octx.font = `800 ${fs}px sans-serif`;
-      const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
-      const padX = 6 / renderScale;
-      const padY = 4 / renderScale;
-      const w = wText + padX * 2;
-      const h = fs + padY * 2;
-      octx.fillStyle = "rgba(255,255,255,0.82)";
-      octx.beginPath();
-      octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
-      octx.fill();
-      octx.textAlign = "center";
-      octx.textBaseline = "middle";
-      octx.fillStyle = obj.color || "#DC2626";
-      octx.fillText(obj.text || "", obj.x, obj.y);
-      octx.restore();
-    } else if (type === "sticker") {
-      this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 15, 0.78, renderScale);
-    } else if (type === "line") {
-      octx.save();
-      const sw = (obj.strokeWidth || 1.8) / renderScale;
-      octx.strokeStyle = obj.color || "#2563EB";
-      octx.lineWidth = sw;
-      octx.beginPath();
-      octx.moveTo(obj.x1, obj.y1);
-      octx.lineTo(obj.x2, obj.y2);
-      octx.stroke();
-      if (obj.text) {
-        this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", 14, 0.9, renderScale);
-      }
-      octx.restore();
-    } else if (type === "arrow") {
-      octx.save();
-      const col = obj.color || "#DC2626";
-      const sw = (obj.strokeWidth || 1.8) / renderScale;
-      octx.strokeStyle = col;
-      octx.fillStyle = col;
-      octx.lineWidth = sw;
-      octx.beginPath();
-      octx.moveTo(obj.x1, obj.y1);
-      octx.lineTo(obj.x2, obj.y2);
-      octx.stroke();
-      const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
-      const headLen = 12 / renderScale;
-      octx.beginPath();
-      octx.moveTo(obj.x1, obj.y1);
-      octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
-      octx.lineTo(obj.x1 - headLen * Math.cos(ang + Math.PI / 6), obj.y1 - headLen * Math.sin(ang + Math.PI / 6));
-      octx.closePath();
-      octx.fill();
-      if (obj.text) {
-        this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 16, 0.8, renderScale);
-      }
-      octx.restore();
-    } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
-      octx.save();
-      octx.strokeStyle = obj.color || "#DC2626";
-      octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
-      octx.lineCap = "round";
-      octx.lineJoin = "round";
-      octx.beginPath();
-      octx.moveTo(obj.points[0].x, obj.points[0].y);
-      for (let i = 1; i < obj.points.length; i++) octx.lineTo(obj.points[i].x, obj.points[i].y);
-      octx.stroke();
-      octx.restore();
     }
 
+    // 依索引由大到小刪除已合併物件，避免索引位移
+    const sortedDesc = [...this.selectedItems].sort((a, b) => b.index - a.index);
+    sortedDesc.forEach(it => this.deleteObjectAt(it.type, it.index));
+
     const mergedDataUrl = off.toDataURL("image/jpeg", 0.88);
-    this.deleteObjectAt(type, index);
-    this.selectedItem = null;
+    this.selectedItems = [];
     this.updateNearToolbar();
     this.imageUrl = mergedDataUrl;
     this.bgImg = new Image();
@@ -291,7 +313,7 @@ export class MeasureCanvas {
         await this.navOpts.onBaseImageMerged(prev.imageUrl);
       }
     }
-    this.selectedItem = null;
+    this.selectedItems = [];
     this.updateNearToolbar();
     this.updateUndoButtonState();
     this.emitSave();
@@ -310,6 +332,9 @@ export class MeasureCanvas {
     this.rootEl.querySelectorAll(".mc-tool-btn").forEach(b => {
       b.classList.toggle("active", b.dataset.mode === newMode);
     });
+    const multiWrap = this.rootEl.querySelector(".mc-select-mode-pill");
+    if (multiWrap) multiWrap.classList.toggle("hidden", newMode !== "SELECT");
+
     if (typeof this.navOpts.onModeSync === "function") {
       this.navOpts.onModeSync(newMode);
     }
@@ -320,7 +345,7 @@ export class MeasureCanvas {
       this.stampPanel.classList.add("hidden");
     }
     if (newMode !== "SELECT" && newMode !== "VIEW") {
-      this.selectedItem = null;
+      this.selectedItems = [];
       this.updateNearToolbar();
     }
     this.render();
@@ -328,29 +353,32 @@ export class MeasureCanvas {
 
   setActiveColor(col) {
     this.activeColor = col;
-    if (this.selectedItem) {
-      const obj = this.getSelectedObject();
-      if (obj && this.selectedItem.type !== "overlay") {
-        this.pushUndoSnapshot();
+    if (this.selectedItems.length) {
+      this.pushUndoSnapshot();
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (!obj || it.type === "overlay") return;
         obj.color = col;
-        if (this.selectedItem.type === "sticker") {
+        if (it.type === "sticker") {
           obj.bg = col === "#FFFFFF" ? "#0F172A" : col;
           obj.color = "#FFFFFF";
         }
-        this.emitSave();
-        this.render();
-      }
+      });
+      this.emitSave();
+      this.render();
     }
   }
 
   setStrokeWidth(val) {
     this.strokeWidth = val;
-    if (this.selectedItem) {
-      const obj = this.getSelectedObject();
-      if (obj && (this.selectedItem.type === "path" || this.selectedItem.type === "line" || this.selectedItem.type === "arrow")) {
-        obj.strokeWidth = val;
-        this.render();
-      }
+    if (this.selectedItems.length) {
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (obj && (it.type === "path" || it.type === "line" || it.type === "arrow")) {
+          obj.strokeWidth = val;
+        }
+      });
+      this.render();
     }
   }
 
@@ -399,34 +427,43 @@ export class MeasureCanvas {
       <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none;">
         <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC;"></canvas>
 
-        <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:4px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
-          <button class="mc-tool-btn" data-mode="RULER" title="拉尺寸線">📏 拉尺</button>
-          <button class="mc-tool-btn" data-mode="PEN" title="自由手繪">✏️ 畫筆</button>
-          <button class="mc-tool-btn" data-mode="TEXT" title="普通純打字">🔤 文字</button>
-          <button class="mc-tool-btn" data-mode="STAMP" title="現場常用印章">🏷️ 印章</button>
-          <button type="button" class="mc-overlay-pick-btn" title="插入局部細節貼圖並可合併" style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">🖼️ 貼圖</button>
+        <!-- 簡潔俐落無花俏彩色圖示工具列 -->
+        <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
+          <button class="mc-tool-btn" data-mode="RULER">拉尺</button>
+          <button class="mc-tool-btn" data-mode="PEN">畫筆</button>
+          <button class="mc-tool-btn" data-mode="TEXT">文字</button>
+          <button class="mc-tool-btn" data-mode="STAMP">印章</button>
+          <button type="button" class="mc-overlay-pick-btn" style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">貼圖</button>
 
           <span style="color:#CBD5E1; font-weight:300;">|</span>
 
-          <button class="mc-tool-btn active" data-mode="VIEW" title="安全檢視模式">👁️ 檢視</button>
-          <button class="mc-tool-btn" data-mode="SELECT" title="選取並移動">✋ 選取</button>
-          <button class="mc-undo-btn" title="復原上一步" disabled style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 7px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; opacity:0.4;">↩ 復原</button>
-          <button class="mc-tool-btn" data-mode="ERASER" title="點擊擦除單項">🧽 擦除</button>
+          <button class="mc-tool-btn active" data-mode="VIEW">檢視</button>
+          <button class="mc-tool-btn" data-mode="SELECT">選取</button>
+          <button class="mc-undo-btn" disabled style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; opacity:0.4;">復原</button>
+          <button class="mc-tool-btn" data-mode="ERASER">擦除</button>
+        </div>
+
+        <!-- 選取模式專屬「單選 / 多選」切換膠囊 -->
+        <div class="mc-select-mode-pill hidden" style="position:absolute; top:46px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:4px; background:rgba(15,23,42,0.92); color:#FFF; padding:3px 8px; border-radius:999px; font-size:11px; z-index:22; box-shadow:0 4px 12px rgba(0,0,0,0.2);">
+          <button type="button" class="mc-sel-single active" style="background:#3B82F6; color:#FFF; border:none; border-radius:999px; padding:2px 9px; font-size:11px; font-weight:800; cursor:pointer;">單選</button>
+          <button type="button" class="mc-sel-multi" style="background:transparent; color:#CBD5E1; border:none; border-radius:999px; padding:2px 9px; font-size:11px; font-weight:800; cursor:pointer;">多選 / 框選</button>
+          <button type="button" class="mc-sel-clear hidden" style="background:#475569; color:#FFF; border:none; border-radius:999px; padding:2px 8px; font-size:10px; cursor:pointer;">取消全選</button>
         </div>
 
         <input type="file" class="mc-overlay-file-input hidden" accept="image/*" />
 
-        <!-- 🏷️ 現場常用詞印章面板 -->
+        <!-- 現場常用詞印章面板 -->
         <div class="mc-stamp-panel hidden" style="position:absolute; top:46px; left:50%; transform:translateX(-50%); width:min(440px, 94vw); background:rgba(255,255,255,0.92); backdrop-filter:blur(6px); border:1.5px solid #94A3B8; border-radius:10px; padding:7px 9px; box-shadow:0 8px 22px rgba(15,23,42,0.16); z-index:24; display:flex; flex-direction:column; gap:6px;">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
             <div class="mc-stamp-cats" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
-            <button type="button" class="mc-stamp-manage-btn" style="background:#EFF6FF; border:1px solid #93C5FD; border-radius:5px; padding:2px 7px; font-size:11px; font-weight:700; color:#1D4ED8; cursor:pointer; white-space:nowrap;">⚙️ 管理雲端詞庫</button>
+            <button type="button" class="mc-stamp-manage-btn" style="background:#EFF6FF; border:1px solid #93C5FD; border-radius:5px; padding:2px 7px; font-size:11px; font-weight:700; color:#1D4ED8; cursor:pointer; white-space:nowrap;">管理雲端詞庫</button>
           </div>
           <div class="mc-stamp-items" style="display:flex; flex-wrap:wrap; gap:5px;"></div>
         </div>
 
-        <!-- 選中物件的小工具條（輸入框開啟時自動隱藏，絕不遮擋） -->
+        <!-- 選中物件的小工具條（支援單選與多選批量操作） -->
         <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:35; white-space:nowrap;">
+          <span class="mc-near-count hidden" style="background:#2563EB; color:#FFF; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;">已選2項</span>
           <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
           <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">18</span>
           <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
@@ -438,12 +475,12 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <button type="button" class="mc-near-merge" title="合併到底圖成為一張更新圖片" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">📌 合併到底圖</button>
-          <button type="button" class="mc-near-edit" title="改字" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">✏️</button>
-          <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">🗑️</button>
+          <button type="button" class="mc-near-merge" title="合併到底圖成為一張更新圖片" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">合併到底圖</button>
+          <button type="button" class="mc-near-edit" title="改字" style="background:#334155; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">改字</button>
+          <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">刪除</button>
         </div>
 
-        <!-- 📏 拉尺專屬快捷選項浮窗（含頂部可拖動列 + 闊高深凹凸外計內計常駐排 + 高/留位/構造/其他） -->
+        <!-- 拉尺專屬快捷選項浮窗 -->
         <div class="mc-ruler-box hidden" style="position:absolute; width:min(330px, 92vw); background:#FFF; border:1.5px solid #0F172A; border-radius:10px; padding:7px; box-shadow:0 12px 28px rgba(15,23,42,0.26); z-index:48; display:flex; flex-direction:column; gap:6px;">
           <div class="mc-ruler-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#F1F5F9; padding:3px 7px; border-radius:5px; cursor:grab; font-size:11px; color:#475569;">
             <strong>⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span></strong>
@@ -456,7 +493,6 @@ export class MeasureCanvas {
             <button type="button" class="mc-ruler-ok" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:5px 12px; font-size:12px; font-weight:800; cursor:pointer;">確定</button>
           </div>
 
-          <!-- 常駐最高頻單字排 -->
           <div style="display:flex; flex-wrap:wrap; gap:4px;">
             ${RULER_QUICK_WORDS.map(w => `
               <button type="button" class="mc-rword-btn" data-rword="${w}"
@@ -466,7 +502,6 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 4 大分類切換標籤 -->
           <div class="mc-ruler-cats" style="display:flex; gap:4px; border-top:1px solid #E2E8F0; padding-top:5px;">
             ${["高", "留位", "構造", "其他"].map(cat => `
               <button type="button" class="mc-rcat-btn" data-rcat="${cat}"
@@ -476,16 +511,15 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 對應分類詞彙區 -->
           <div class="mc-ruler-items" style="max-height:115px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px; background:#F8FAFC; padding:5px; border-radius:6px; border:1px solid #E2E8F0;"></div>
 
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <button type="button" class="mc-ruler-cancel-btn" style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; border-radius:4px; padding:2px 8px; font-size:11px; cursor:pointer;">取消</button>
-            <button type="button" class="mc-ruler-dict-btn" style="background:#EFF6FF; color:#1D4ED8; border:1px solid #93C5FD; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:700; cursor:pointer;">⚙️ 詞庫</button>
+            <button type="button" class="mc-ruler-dict-btn" style="background:#EFF6FF; color:#1D4ED8; border:1px solid #93C5FD; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:700; cursor:pointer;">詞庫</button>
           </div>
         </div>
 
-        <!-- 🔤 普通純打字極簡小框 -->
+        <!-- 普通純打字極簡小框 -->
         <div class="mc-plain-text-box hidden" style="position:absolute; width:min(220px, 84vw); background:#FFF; border:1.5px solid #0F172A; border-radius:8px; padding:6px; box-shadow:0 8px 20px rgba(15,23,42,0.2); z-index:46; display:flex; flex-direction:column; gap:5px;">
           <input type="text" class="mc-plain-input" placeholder="輸入文字或數字..."
                  style="width:100%; box-sizing:border-box; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:13px;" />
@@ -495,11 +529,11 @@ export class MeasureCanvas {
           </div>
         </div>
 
-        <!-- ↗ 箭頭批改瘦身小浮窗（頂部可按住自由拖動搬位） -->
+        <!-- 箭頭批改瘦身小浮窗 -->
         <div class="mc-arrow-box hidden" style="position:absolute; width:min(280px, 88vw); background:#FFF; border:1.5px solid #2563EB; border-radius:9px; padding:6px; box-shadow:0 10px 24px rgba(15,23,42,0.22); z-index:45; display:flex; flex-direction:column; gap:5px;">
           <div class="mc-arrow-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#EFF6FF; padding:2px 6px; border-radius:4px; cursor:grab; font-size:10px; color:#1D4ED8;">
             <strong>⠿ 箭頭批改 <span style="font-weight:400;">(按住可拖動)</span></strong>
-            <button type="button" class="mc-manage-phrase-btn" title="管理雲端短語庫" style="background:#FFF; border:1px solid #93C5FD; border-radius:4px; padding:1px 5px; font-size:10px; font-weight:700; color:#1D4ED8; cursor:pointer;">⚙️ 短語庫</button>
+            <button type="button" class="mc-manage-phrase-btn" style="background:#FFF; border:1px solid #93C5FD; border-radius:4px; padding:1px 5px; font-size:10px; font-weight:700; color:#1D4ED8; cursor:pointer;">短語庫</button>
           </div>
 
           <div class="mc-arrow-status-row" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:3px;">
@@ -545,7 +579,7 @@ export class MeasureCanvas {
 
     const styleTag = document.createElement("style");
     styleTag.textContent = `
-      .mc-tool-btn { background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; }
+      .mc-tool-btn { background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; }
       .mc-tool-btn.active { background:#EFF6FF; border-color:#3B82F6; color:#1D4ED8; }
       .mc-st-pill.active { outline: 2px solid #0F172A; }
     `;
@@ -563,7 +597,7 @@ export class MeasureCanvas {
 
     if (!groups.length) {
       catsEl.innerHTML = `<span style="font-size:11px; color:#64748B;">雲端尚未建立印章詞庫</span>`;
-      itemsEl.innerHTML = `<div style="font-size:11px; color:#475569;">請點擊右上角「⚙️ 管理雲端詞庫」新增或一鍵匯入範本到雲端資料庫。</div>`;
+      itemsEl.innerHTML = `<div style="font-size:11px; color:#475569;">請點擊右上角「管理雲端詞庫」新增或一鍵匯入範本。</div>`;
       return;
     }
 
@@ -652,6 +686,39 @@ export class MeasureCanvas {
       btn.onclick = () => this.setMode(btn.dataset.mode);
     });
 
+    // 單選 / 多選切換
+    const singleBtn = this.rootEl.querySelector(".mc-sel-single");
+    const multiBtn = this.rootEl.querySelector(".mc-sel-multi");
+    const clearSelBtn = this.rootEl.querySelector(".mc-sel-clear");
+
+    const syncMultiUI = () => {
+      singleBtn.style.background = !this.multiSelectMode ? "#3B82F6" : "transparent";
+      singleBtn.style.color = !this.multiSelectMode ? "#FFF" : "#CBD5E1";
+      multiBtn.style.background = this.multiSelectMode ? "#3B82F6" : "transparent";
+      multiBtn.style.color = this.multiSelectMode ? "#FFF" : "#CBD5E1";
+      clearSelBtn.classList.toggle("hidden", this.selectedItems.length < 2);
+    };
+
+    singleBtn.onclick = () => {
+      this.multiSelectMode = false;
+      if (this.selectedItems.length > 1) this.selectedItems = [this.selectedItems[this.selectedItems.length - 1]];
+      syncMultiUI();
+      this.updateNearToolbar();
+      this.render();
+    };
+    multiBtn.onclick = () => {
+      this.multiSelectMode = true;
+      syncMultiUI();
+      this.updateNearToolbar();
+      this.render();
+    };
+    clearSelBtn.onclick = () => {
+      this.selectedItems = [];
+      syncMultiUI();
+      this.updateNearToolbar();
+      this.render();
+    };
+
     this.rootEl.querySelector(".mc-undo-btn").onclick = () => this.undo();
 
     const overlayInput = this.rootEl.querySelector(".mc-overlay-file-input");
@@ -689,20 +756,23 @@ export class MeasureCanvas {
     if (nextBtn && this.navOpts.onNext) nextBtn.onclick = () => this.navOpts.onNext();
 
     const adjustSelectedSize = (delta) => {
-      const obj = this.getSelectedObject();
-      if (!obj) return;
+      if (!this.selectedItems.length) return;
       this.pushUndoSnapshot();
-      if (this.selectedItem.type === "overlay") {
-        const factor = delta > 0 ? 1.15 : 0.87;
-        obj.w = Math.max(40, obj.w * factor);
-        obj.h = Math.max(40, obj.h * factor);
-      } else if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow" || this.selectedItem.type === "line") {
-        const cur = obj.fontSize || (this.selectedItem.type === "line" ? 14 : 18);
-        const step = Math.max(2, Math.round(cur * 0.14));
-        obj.fontSize = Math.min(120, Math.max(10, cur + (delta > 0 ? step : -step)));
-      } else {
-        obj.strokeWidth = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
-      }
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (!obj) return;
+        if (it.type === "overlay") {
+          const factor = delta > 0 ? 1.15 : 0.87;
+          obj.w = Math.max(40, obj.w * factor);
+          obj.h = Math.max(40, obj.h * factor);
+        } else if (it.type === "marker" || it.type === "sticker" || it.type === "arrow" || it.type === "line") {
+          const cur = obj.fontSize || (it.type === "line" ? 15 : 18);
+          const step = Math.max(2, Math.round(cur * 0.14));
+          obj.fontSize = Math.min(120, Math.max(10, cur + (delta > 0 ? step : -step)));
+        } else {
+          obj.strokeWidth = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
+        }
+      });
       this.updateNearToolbar();
       this.emitSave();
       this.render();
@@ -712,33 +782,38 @@ export class MeasureCanvas {
     this.nearToolbar.querySelector(".mc-near-inc").onclick = () => adjustSelectedSize(2);
 
     this.nearToolbar.querySelector(".mc-near-merge").onclick = async () => {
-      if (!this.selectedItem) return;
-      await this.flattenItemIntoBase(this.selectedItem);
+      if (!this.selectedItems.length) return;
+      await this.flattenSelectedItemsIntoBase();
     };
 
     this.nearToolbar.querySelectorAll(".mc-near-color").forEach(btn => {
       btn.onclick = () => {
-        const obj = this.getSelectedObject();
-        if (!obj || this.selectedItem.type === "overlay") return;
+        if (!this.selectedItems.length) return;
         this.pushUndoSnapshot();
         const col = btn.dataset.ncol;
-        if (this.selectedItem.type === "sticker") {
-          obj.bg = col === "#FFFFFF" ? "#0F172A" : col;
-          obj.color = "#FFFFFF";
-        } else {
-          obj.color = col;
-        }
+        this.selectedItems.forEach(it => {
+          const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+          if (!obj || it.type === "overlay") return;
+          if (it.type === "sticker") {
+            obj.bg = col === "#FFFFFF" ? "#0F172A" : col;
+            obj.color = "#FFFFFF";
+          } else {
+            obj.color = col;
+          }
+        });
         this.emitSave();
         this.render();
       };
     });
 
     this.nearToolbar.querySelector(".mc-near-edit").onclick = () => {
-      const obj = this.getSelectedObject();
+      if (this.selectedItems.length !== 1) return;
+      const single = this.selectedItems[0];
+      const obj = this.getObjectByTypeAndIndex(single.type, single.index);
       if (!obj) return;
-      const anchor = this.getObjectAnchorImg(this.selectedItem.type, obj);
+      const anchor = this.getObjectAnchorImg(single.type, obj);
       const scr = this.imgToScreen(anchor.x, anchor.y);
-      if (this.selectedItem.type === "arrow") {
+      if (single.type === "arrow") {
         this.openArrowEditor(scr.x, scr.y, obj.text || "", obj.status || "NEED_FIX", (newTxt, newStatus) => {
           this.pushUndoSnapshot();
           obj.text = newTxt;
@@ -747,7 +822,7 @@ export class MeasureCanvas {
           this.updateNearToolbar();
           this.render();
         });
-      } else if (this.selectedItem.type === "line") {
+      } else if (single.type === "line") {
         this.openRulerEditor(scr.x, scr.y, obj.text || "", (newTxt) => {
           this.pushUndoSnapshot();
           obj.text = newTxt;
@@ -758,7 +833,7 @@ export class MeasureCanvas {
       } else {
         this.openPlainTextEditor(scr.x, scr.y, obj.text || obj.label || "", (newTxt) => {
           this.pushUndoSnapshot();
-          if (this.selectedItem.type === "sticker") obj.label = newTxt;
+          if (single.type === "sticker") obj.label = newTxt;
           else obj.text = newTxt;
           this.emitSave();
           this.updateNearToolbar();
@@ -768,16 +843,17 @@ export class MeasureCanvas {
     };
 
     this.nearToolbar.querySelector(".mc-near-del").onclick = () => {
-      if (!this.selectedItem) return;
+      if (!this.selectedItems.length) return;
       this.pushUndoSnapshot();
-      this.deleteObjectAt(this.selectedItem.type, this.selectedItem.index);
-      this.selectedItem = null;
+      const sortedDesc = [...this.selectedItems].sort((a, b) => b.index - a.index);
+      sortedDesc.forEach(it => this.deleteObjectAt(it.type, it.index));
+      this.selectedItems = [];
       this.updateNearToolbar();
       this.emitSave();
       this.render();
     };
 
-    // 📏 拉尺浮窗事件
+    // 拉尺浮窗事件
     const appendRulerToken = (tok) => {
       const cur = this.rulerInput.value.trim();
       this.rulerInput.value = cur ? `${cur} ${tok}` : tok;
@@ -812,7 +888,7 @@ export class MeasureCanvas {
       }
     };
 
-    // 🔤 純文字小框事件
+    // 純文字小框事件
     this.plainTextBox.querySelector(".mc-plain-cancel").onclick = () => {
       this.plainTextBox.classList.add("hidden");
       this.pendingPlainTextAction = null;
@@ -823,7 +899,7 @@ export class MeasureCanvas {
       if (e.key === "Enter") { e.preventDefault(); this.commitPlainText(true); }
     });
 
-    // ↗ 箭頭批改浮窗事件
+    // 箭頭批改浮窗事件
     this.arrowBox.querySelectorAll(".mc-st-pill").forEach(pill => {
       pill.onclick = () => {
         this.selectedArrowStatus = pill.dataset.stkey;
@@ -862,6 +938,7 @@ export class MeasureCanvas {
       if (e.touches.length === 2) {
         this.isDrawing = false;
         this.draftObj = null;
+        this.marqueeRect = null;
         this.pinchDist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
@@ -894,6 +971,14 @@ export class MeasureCanvas {
     this.render();
   }
 
+  startDragSelectedGroup(startImgPt) {
+    const snapshots = this.selectedItems.map(it => ({
+      ...it,
+      orig: JSON.parse(JSON.stringify(this.getObjectByTypeAndIndex(it.type, it.index)))
+    }));
+    this.dragGroupState = { startImg: startImgPt, moved: false, snapshots };
+  }
+
   handlePointerDown(e) {
     if (e.pointerType === "touch" && !e.isPrimary) return;
     const rect = this.canvas.getBoundingClientRect();
@@ -905,8 +990,8 @@ export class MeasureCanvas {
     if (now - this.lastTapTime < 320 && this.lastTapPos && Math.hypot(sx - this.lastTapPos.x, sy - this.lastTapPos.y) < 22) {
       const hit = this.hitTest(pt.x, pt.y);
       if (hit && (hit.type === "marker" || hit.type === "arrow" || hit.type === "line" || hit.type === "sticker")) {
-        this.selectedItem = hit;
-        const obj = this.getSelectedObject();
+        this.setSingleSelection(hit);
+        const obj = this.getObjectByTypeAndIndex(hit.type, hit.index);
         if (hit.type === "arrow") {
           this.openArrowEditor(sx, sy, obj.text || "", obj.status || "NEED_FIX", (newTxt, newStatus) => {
             this.pushUndoSnapshot();
@@ -942,8 +1027,8 @@ export class MeasureCanvas {
     this.lastTapPos = { x: sx, y: sy };
 
     if (this.mode === "VIEW") {
-      if (this.selectedItem) {
-        this.selectedItem = null;
+      if (this.selectedItems.length) {
+        this.selectedItems = [];
         this.updateNearToolbar();
         this.render();
       }
@@ -957,7 +1042,7 @@ export class MeasureCanvas {
       if (hit) {
         this.pushUndoSnapshot();
         this.deleteObjectAt(hit.type, hit.index);
-        this.selectedItem = null;
+        this.selectedItems = [];
         this.updateNearToolbar();
         this.emitSave();
         this.render();
@@ -968,20 +1053,26 @@ export class MeasureCanvas {
     if (this.mode === "SELECT") {
       const hit = this.hitTest(pt.x, pt.y);
       if (hit) {
-        this.selectedItem = hit;
-        this.dragTarget = {
-          ...hit,
-          startImg: pt,
-          moved: false,
-          orig: JSON.parse(JSON.stringify(this.getSelectedObject()))
-        };
+        if (this.multiSelectMode) {
+          this.toggleSelectionItem(hit);
+          if (this.selectedItems.length) this.startDragSelectedGroup(pt);
+        } else {
+          if (!this.isItemSelected(hit.type, hit.index)) this.setSingleSelection(hit);
+          this.startDragSelectedGroup(pt);
+        }
+        this.rootEl.querySelector(".mc-sel-clear")?.classList.toggle("hidden", this.selectedItems.length < 2);
         this.updateNearToolbar();
         this.render();
       } else {
-        this.selectedItem = null;
-        this.updateNearToolbar();
-        this.isPanning = true;
-        this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
+        if (this.multiSelectMode) {
+          // 空白處拖曳拉出多選框
+          this.marqueeRect = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
+        } else {
+          this.selectedItems = [];
+          this.updateNearToolbar();
+          this.isPanning = true;
+          this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
+        }
         this.render();
       }
       return;
@@ -1002,7 +1093,7 @@ export class MeasureCanvas {
           color: this.activeColor,
           fontSize: adaptiveFs
         });
-        this.selectedItem = { type: "marker", index: this.markers.length - 1 };
+        this.setSingleSelection({ type: "marker", index: this.markers.length - 1 });
         this.setMode("VIEW");
         this.updateNearToolbar();
         this.emitSave();
@@ -1027,7 +1118,7 @@ export class MeasureCanvas {
         color: "#FFFFFF",
         fontSize: adaptiveFs
       });
-      this.selectedItem = { type: "sticker", index: this.stickers.length - 1 };
+      this.setSingleSelection({ type: "sticker", index: this.stickers.length - 1 });
       this.setMode("VIEW");
       this.updateNearToolbar();
       this.emitSave();
@@ -1089,27 +1180,35 @@ export class MeasureCanvas {
 
     const pt = this.screenToImg(sx, sy);
 
-    if (this.dragTarget) {
-      const dx = pt.x - this.dragTarget.startImg.x;
-      const dy = pt.y - this.dragTarget.startImg.y;
-      if (!this.dragTarget.moved && Math.hypot(dx, dy) > 2 / this.scale) {
+    if (this.marqueeRect) {
+      this.marqueeRect.x2 = pt.x;
+      this.marqueeRect.y2 = pt.y;
+      this.render();
+      return;
+    }
+
+    if (this.dragGroupState) {
+      const dx = pt.x - this.dragGroupState.startImg.x;
+      const dy = pt.y - this.dragGroupState.startImg.y;
+      if (!this.dragGroupState.moved && Math.hypot(dx, dy) > 2 / this.scale) {
         this.pushUndoSnapshot();
-        this.dragTarget.moved = true;
+        this.dragGroupState.moved = true;
       }
-      const obj = this.getSelectedObject();
-      const orig = this.dragTarget.orig;
-      if (obj && orig) {
-        if (this.dragTarget.type === "marker" || this.dragTarget.type === "sticker" || this.dragTarget.type === "overlay") {
+      this.dragGroupState.snapshots.forEach(snap => {
+        const obj = this.getObjectByTypeAndIndex(snap.type, snap.index);
+        const orig = snap.orig;
+        if (!obj || !orig) return;
+        if (snap.type === "marker" || snap.type === "sticker" || snap.type === "overlay") {
           obj.x = orig.x + dx; obj.y = orig.y + dy;
-        } else if (this.dragTarget.type === "line" || this.dragTarget.type === "arrow") {
+        } else if (snap.type === "line" || snap.type === "arrow") {
           obj.x1 = orig.x1 + dx; obj.y1 = orig.y1 + dy;
           obj.x2 = orig.x2 + dx; obj.y2 = orig.y2 + dy;
-        } else if (this.dragTarget.type === "path" && Array.isArray(orig.points)) {
+        } else if (snap.type === "path" && Array.isArray(orig.points)) {
           obj.points = orig.points.map(p => ({ x: p.x + dx, y: p.y + dy }));
         }
-        this.updateNearToolbar();
-        this.render();
-      }
+      });
+      this.updateNearToolbar();
+      this.render();
       return;
     }
 
@@ -1125,12 +1224,39 @@ export class MeasureCanvas {
 
   handlePointerUp(e) {
     if (this.isPanning) { this.isPanning = false; return; }
-    if (this.dragTarget) {
-      const didMove = this.dragTarget.moved;
-      this.dragTarget = null;
+
+    if (this.marqueeRect) {
+      const minX = Math.min(this.marqueeRect.x1, this.marqueeRect.x2);
+      const maxX = Math.max(this.marqueeRect.x1, this.marqueeRect.x2);
+      const minY = Math.min(this.marqueeRect.y1, this.marqueeRect.y2);
+      const maxY = Math.max(this.marqueeRect.y1, this.marqueeRect.y2);
+      this.marqueeRect = null;
+
+      if (maxX - minX > 6 / this.scale || maxY - minY > 6 / this.scale) {
+        const inBox = (ix, iy) => ix >= minX && ix <= maxX && iy >= minY && iy <= maxY;
+        const addIfNew = (type, index) => {
+          if (!this.isItemSelected(type, index)) this.selectedItems.push({ type, index });
+        };
+        this.markers.forEach((m, i) => { if (inBox(m.x, m.y)) addIfNew("marker", i); });
+        this.stickers.forEach((s, i) => { if (inBox(s.x, s.y)) addIfNew("sticker", i); });
+        this.lines.forEach((l, i) => { if (inBox(l.x1, l.y1) || inBox(l.x2, l.y2) || inBox((l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2)) addIfNew("line", i); });
+        this.arrows.forEach((a, i) => { if (inBox(a.x1, a.y1) || inBox(a.x2, a.y2)) addIfNew("arrow", i); });
+        this.paths.forEach((p, i) => { if ((p.points || []).some(pt => inBox(pt.x, pt.y))) addIfNew("path", i); });
+        this.overlays.forEach((ov, i) => { if (inBox(ov.x, ov.y)) addIfNew("overlay", i); });
+      }
+      this.rootEl.querySelector(".mc-sel-clear")?.classList.toggle("hidden", this.selectedItems.length < 2);
+      this.updateNearToolbar();
+      this.render();
+      return;
+    }
+
+    if (this.dragGroupState) {
+      const didMove = this.dragGroupState.moved;
+      this.dragGroupState = null;
       if (didMove) this.emitSave();
       return;
     }
+
     if (!this.isDrawing || !this.draftObj) return;
     this.isDrawing = false;
     const finished = this.draftObj;
@@ -1143,7 +1269,7 @@ export class MeasureCanvas {
       }
       this.pushUndoSnapshot();
       this.arrows.push(finished);
-      this.selectedItem = { type: "arrow", index: this.arrows.length - 1 };
+      this.setSingleSelection({ type: "arrow", index: this.arrows.length - 1 });
       this.render();
 
       const tailScr = this.imgToScreen(finished.x2, finished.y2);
@@ -1153,7 +1279,6 @@ export class MeasureCanvas {
         finished.status = status;
         this.setMode("VIEW");
         this.updateNearToolbar();
-        // 只有實際輸入文字或短語時才寫入「📝 記錄」抽屜，避免空文字灌水
         this.emitSave(cleanTxt ? `[${this.formatStatusLabel(status)}] ${cleanTxt}` : "", status);
         this.render();
       });
@@ -1167,7 +1292,7 @@ export class MeasureCanvas {
       }
       this.pushUndoSnapshot();
       this.lines.push(finished);
-      this.selectedItem = { type: "line", index: this.lines.length - 1 };
+      this.setSingleSelection({ type: "line", index: this.lines.length - 1 });
       this.render();
 
       const midScr = this.imgToScreen((finished.x1 + finished.x2) / 2, (finished.y1 + finished.y2) / 2);
@@ -1183,7 +1308,7 @@ export class MeasureCanvas {
     if (finished.type === "path" && finished.points.length > 1) {
       this.pushUndoSnapshot();
       this.paths.push(finished);
-      this.selectedItem = { type: "path", index: this.paths.length - 1 };
+      this.setSingleSelection({ type: "path", index: this.paths.length - 1 });
       this.updateNearToolbar();
       this.emitSave();
       this.render();
@@ -1191,10 +1316,10 @@ export class MeasureCanvas {
   }
 
   formatStatusLabel(st) {
-    if (st === "OK") return "✅ 確認";
-    if (st === "SITE_CHECK") return "⚠️ 再核對";
-    if (st === "NEED_INFO") return "📌 待補資料";
-    return "❌ 需改";
+    if (st === "OK") return "確認";
+    if (st === "SITE_CHECK") return "再核對";
+    if (st === "NEED_INFO") return "待補資料";
+    return "需改";
   }
 
   hideAllEditors() {
@@ -1234,7 +1359,7 @@ export class MeasureCanvas {
       const groups = this.getStampGroups();
       list = groups.flatMap(g => g.items || []);
       if (!list.length) {
-        itemsEl.innerHTML = `<div style="font-size:11px; color:#64748B;">雲端詞庫尚無項目，點右下「⚙️ 詞庫」新增或匯入範本。</div>`;
+        itemsEl.innerHTML = `<div style="font-size:11px; color:#64748B;">雲端詞庫尚無項目，點右下「詞庫」新增或匯入範本。</div>`;
         return;
       }
     } else {
@@ -1303,7 +1428,6 @@ export class MeasureCanvas {
     const boxW = Math.min(280, this.viewW * 0.88);
     const boxH = 205;
     const left = Math.max(10, Math.min(this.viewW - boxW - 10, screenX - boxW / 2));
-    // 預設優先放在箭尾下方偏下位置，避免擋住箭頭指著的圖紙文字
     const top = screenY + 26 + boxH > this.viewH ? Math.max(48, screenY - boxH - 18) : Math.max(48, screenY + 22);
 
     this.arrowBox.style.left = `${left}px`;
@@ -1327,7 +1451,7 @@ export class MeasureCanvas {
 
     if (!phrases.length) {
       catsEl.innerHTML = "";
-      itemsEl.innerHTML = `<div style="font-size:10px; color:#64748B; padding:3px;">雲端尚未建立短語，點右上「⚙️ 短語庫」新增或匯入範本。</div>`;
+      itemsEl.innerHTML = `<div style="font-size:10px; color:#64748B; padding:3px;">雲端尚未建立短語，點右上「短語庫」新增或匯入範本。</div>`;
       return;
     }
 
@@ -1390,11 +1514,6 @@ export class MeasureCanvas {
     return null;
   }
 
-  getSelectedObject() {
-    if (!this.selectedItem) return null;
-    return this.getObjectByTypeAndIndex(this.selectedItem.type, this.selectedItem.index);
-  }
-
   getObjectAnchorImg(type, obj) {
     if (type === "marker" || type === "sticker") return { x: obj.x, y: obj.y };
     if (type === "overlay") return { x: obj.x, y: obj.y + obj.h / 2 };
@@ -1408,36 +1527,52 @@ export class MeasureCanvas {
   }
 
   updateNearToolbar() {
-    const obj = this.getSelectedObject();
-    // 只要任何文字/拉尺/箭頭輸入框正在開啟，絕對隱藏黑色小工具條，避免重疊遮擋
-    if (!obj || this.isAnyEditorOpen()) {
+    if (!this.selectedItems.length || this.isAnyEditorOpen()) {
       this.nearToolbar.style.display = "none";
       return;
     }
-    const anchor = this.getObjectAnchorImg(this.selectedItem.type, obj);
+
+    const lastSel = this.selectedItems[this.selectedItems.length - 1];
+    const obj = this.getObjectByTypeAndIndex(lastSel.type, lastSel.index);
+    if (!obj) {
+      this.nearToolbar.style.display = "none";
+      return;
+    }
+
+    const anchor = this.getObjectAnchorImg(lastSel.type, obj);
     const scr = this.imgToScreen(anchor.x, anchor.y);
 
+    const countEl = this.nearToolbar.querySelector(".mc-near-count");
     const valEl = this.nearToolbar.querySelector(".mc-near-val");
     const editBtn = this.nearToolbar.querySelector(".mc-near-edit");
     const colorsWrap = this.nearToolbar.querySelector(".mc-near-colors-wrap");
 
-    if (this.selectedItem.type === "overlay") {
-      valEl.textContent = `${Math.round(obj.w)}w`;
+    if (this.selectedItems.length > 1) {
+      countEl.textContent = `已選${this.selectedItems.length}項`;
+      countEl.classList.remove("hidden");
       editBtn.style.display = "none";
-      colorsWrap.style.display = "none";
-    } else {
       colorsWrap.style.display = "flex";
-      if (this.selectedItem.type === "marker" || this.selectedItem.type === "sticker" || this.selectedItem.type === "arrow" || this.selectedItem.type === "line") {
-        valEl.textContent = String(obj.fontSize || (this.selectedItem.type === "line" ? 15 : 18));
-        editBtn.style.display = "inline-flex";
-      } else {
-        valEl.textContent = String(obj.strokeWidth || 1.5);
+      valEl.textContent = "批量";
+    } else {
+      countEl.classList.add("hidden");
+      if (lastSel.type === "overlay") {
+        valEl.textContent = `${Math.round(obj.w)}w`;
         editBtn.style.display = "none";
+        colorsWrap.style.display = "none";
+      } else {
+        colorsWrap.style.display = "flex";
+        if (lastSel.type === "marker" || lastSel.type === "sticker" || lastSel.type === "arrow" || lastSel.type === "line") {
+          valEl.textContent = String(obj.fontSize || (lastSel.type === "line" ? 15 : 18));
+          editBtn.style.display = "inline-flex";
+        } else {
+          valEl.textContent = String(obj.strokeWidth || 1.5);
+          editBtn.style.display = "none";
+        }
       }
     }
 
     this.nearToolbar.style.display = "flex";
-    const barW = 310;
+    const barW = 320;
     const safeX = Number.isFinite(scr.x) ? scr.x : this.viewW / 2;
     const safeY = Number.isFinite(scr.y) ? scr.y : this.viewH / 2;
     const left = Math.max(8, Math.min(Math.max(8, this.viewW - barW - 8), safeX - barW / 2));
@@ -1574,7 +1709,7 @@ export class MeasureCanvas {
       if (im && im.complete && im.naturalWidth) {
         ctx.save();
         ctx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
-        const isSel = this.selectedItem?.type === "overlay" && this.selectedItem.index === idx;
+        const isSel = this.isItemSelected("overlay", idx);
         ctx.strokeStyle = isSel ? "#FACC15" : "#64748B";
         ctx.lineWidth = (isSel ? 3 : 1.2) / this.scale;
         ctx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
@@ -1594,7 +1729,7 @@ export class MeasureCanvas {
       ctx.moveTo(p.points[0].x, p.points[0].y);
       for (let i = 1; i < p.points.length; i++) ctx.lineTo(p.points[i].x, p.points[i].y);
       ctx.stroke();
-      if (this.selectedItem?.type === "path" && this.selectedItem.index === idx) {
+      if (this.isItemSelected("path", idx)) {
         ctx.strokeStyle = "#FACC15";
         ctx.lineWidth = ((p.strokeWidth || 1.5) + 4) / this.scale;
         ctx.globalAlpha = 0.5;
@@ -1626,7 +1761,7 @@ export class MeasureCanvas {
         const my = (l.y1 + l.y2) / 2;
         this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 15, 0.88, this.scale, false);
       }
-      if (this.selectedItem?.type === "line" && this.selectedItem.index === idx) {
+      if (this.isItemSelected("line", idx)) {
         ctx.strokeStyle = "#FACC15";
         ctx.lineWidth = sw + 4 / this.scale;
         ctx.globalAlpha = 0.5;
@@ -1660,7 +1795,7 @@ export class MeasureCanvas {
       ctx.closePath();
       ctx.fill();
 
-      const isSel = this.selectedItem?.type === "arrow" && this.selectedItem.index === idx;
+      const isSel = this.isItemSelected("arrow", idx);
       if (a.text) {
         this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 16, 0.78, this.scale, isSel);
       }
@@ -1691,7 +1826,7 @@ export class MeasureCanvas {
       ctx.fillStyle = m.color || "#DC2626";
       ctx.fillText(m.text || "", m.x, m.y);
 
-      if (this.selectedItem?.type === "marker" && this.selectedItem.index === idx) {
+      if (this.isItemSelected("marker", idx)) {
         ctx.strokeStyle = "#FACC15";
         ctx.lineWidth = 2.5 / this.scale;
         ctx.strokeRect(b.x, b.y, b.w, b.h);
@@ -1701,10 +1836,26 @@ export class MeasureCanvas {
 
     this.stickers.forEach((st, idx) => {
       ctx.save();
-      const isSel = this.selectedItem?.type === "sticker" && this.selectedItem.index === idx;
+      const isSel = this.isItemSelected("sticker", idx);
       this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 15, 0.76, this.scale, isSel);
       ctx.restore();
     });
+
+    // 多選框選矩形虛線
+    if (this.marqueeRect) {
+      ctx.save();
+      ctx.strokeStyle = "#2563EB";
+      ctx.fillStyle = "rgba(37, 99, 235, 0.12)";
+      ctx.lineWidth = 1.5 / this.scale;
+      ctx.setLineDash([5 / this.scale, 4 / this.scale]);
+      const rx = Math.min(this.marqueeRect.x1, this.marqueeRect.x2);
+      const ry = Math.min(this.marqueeRect.y1, this.marqueeRect.y2);
+      const rw = Math.abs(this.marqueeRect.x2 - this.marqueeRect.x1);
+      const rh = Math.abs(this.marqueeRect.y2 - this.marqueeRect.y1);
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.restore();
+    }
 
     ctx.restore();
   }
