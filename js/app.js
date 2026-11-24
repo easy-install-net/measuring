@@ -1,1967 +1,1882 @@
-import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import { db, COLLECTIONS } from "./config/firebase-init.js";
-import { loadMasterDict } from "./config/master-dict.js";
-import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
-import { uploadMediaToCloud } from "./core/image-upload.js";
-import { MeasureCanvas } from "./modules/measure-canvas.js";
-import { renderReportBuilder } from "./modules/report-builder.js";
+const ARROW_STATUS_BUTTONS = [
+  { key: "OK", label: "確認", bg: "#DCFCE7", fg: "#166534", border: "#86EFAC" },
+  { key: "NEED_FIX", label: "需改", bg: "#FEE2E2", fg: "#991B1B", border: "#FCA5A5" },
+  { key: "SITE_CHECK", label: "再核對", bg: "#FEF3C7", fg: "#92400E", border: "#FCD34D" },
+  { key: "NEED_INFO", label: "待補資料", bg: "#DBEAFE", fg: "#1E40AF", border: "#93C5FD" }
+];
 
-const PROJ_COL = (COLLECTIONS && COLLECTIONS.PROJECTS) || "measuring_projects";
-const MEDIA_COL = (COLLECTIONS && COLLECTIONS.MEDIA) || "measuring_media";
-const SETTINGS_COL = "measuring_settings";
-const CLOUD_DICT_DOC_ID = "measuring_cloud_dictionary_v1";
-const LOCAL_ACTIVE_KEY = "measuring_local_active_projects_v2";
-const HIDDEN_STORAGE_KEY = "measuring_hidden_proj_ids";
+const RULER_QUICK_WORDS = ["闊", "高", "深", "凹", "凸", "外計", "內計"];
 
-const root = document.getElementById("app-root");
-let masterDict = null;
-let currentProject = null;
-let activePageIdx = -1;
-let compareSpaceName = null;
-let filterSpace = "ALL";
-let filterCategory = "ALL";
-let showArchivedInSummon = false;
-let summonSearchText = "";
-let cachedCloudActiveList = null;
-let cachedCloudArchivedList = null;
-let openContactProjId = null;
-let activeCanvasInstance = null;
-let overviewRenderGeneration = 0;
-
-let cloudStampGroups = [];
-let cloudPhraseBank = [];
-let cloudPresetSpaces = ["總圖", "玄關", "客廳", "飯廳", "廚房", "主人房", "兒童房", "工人房", "浴室", "露台"];
-const memoryPhotoCache = new Map();
-
-const CORE_CATEGORIES = ["度尺圖", "平面圖", "繪圖", "效果圖"];
-const CAT_RANK = { "平面圖": 1, "度尺圖": 2, "繪圖": 3, "效果圖": 4 };
-
-function normalizePageCategory(p) {
-  const raw = String(p?.docTypeLabel || p?.docType || "").trim();
-  if (raw === "平面圖" || raw === "plan") return "平面圖";
-  if (raw === "效果圖" || raw === "render") return "效果圖";
-  if (raw === "繪圖" || raw === "立體圖" || raw === "詳圖" || raw === "3d" || raw === "detail") return "繪圖";
-  return "度尺圖";
-}
-
-const REVIEW_STATUS_META = {
-  NEED_FIX:   { label: "❌ 需改",     bg: "#FEE2E2", text: "#991B1B", border: "#FCA5A5", badgeBg: "#DC2626", badgeText: "#FFFFFF" },
-  SITE_CHECK: { label: "⚠️ 再核對",   bg: "#FEF3C7", text: "#92400E", border: "#FCD34D", badgeBg: "#D97706", badgeText: "#FFFFFF" },
-  NEED_INFO:  { label: "📌 待補資料", bg: "#DBEAFE", text: "#1E40AF", border: "#93C5FD", badgeBg: "#2563EB", badgeText: "#FFFFFF" },
-  OK:         { label: "✅ 確認",     bg: "#DCFCE7", text: "#166534", border: "#86EFAC", badgeBg: "#059669", badgeText: "#FFFFFF" }
+const RULER_CATEGORY_ITEMS = {
+  "高": ["樓底", "假天花底", "陣底", "石基", "最低陣底", "窗台面", "窗石高", "面高"],
+  "留位": [
+    "來水", "去水", "冷氣雪種", "冷氣去水", "明喉(闊高厚)", "地漏",
+    "通道", "腳線(高厚)", "開門佔位", "門框(闊高厚)", "窗簾盒(闊高厚)", "門檻級差(闊高厚)",
+    "煤氣錶(闊高厚)", "熱水爐(闊高厚)", "煙道孔(闊高厚)", "煮食爐", "洗碗機(闊高深)", "雪櫃(闊高深)", "洗衣機(闊高深)",
+    "電箱(闊高厚)", "冷氣(闊高厚)", "對講機(闊高厚)", "消防頭(闊高)", "天花燈(闊高厚)"
+  ],
+  "構造": ["收口", "生側", "明線", "平線", "木殼", "牆身斜"]
 };
-const STATUS_CYCLE_ORDER = ["NEED_FIX", "SITE_CHECK", "NEED_INFO", "OK"];
 
-function normalizeReviewStatus(raw) {
-  if (raw === "OK" || raw === "DONE") return "OK";
-  if (raw === "SITE_CHECK") return "SITE_CHECK";
-  if (raw === "NEED_INFO") return "NEED_INFO";
-  return "NEED_FIX";
+const FALLBACK_COLORS = ["#DC2626", "#2563EB", "#059669", "#9333EA", "#EA580C", "#111827", "#EAB308", "#FFFFFF"];
+
+function normalizeColorList(rawColors) {
+  if (!Array.isArray(rawColors) || !rawColors.length) return FALLBACK_COLORS;
+  const parsed = rawColors.map(c => {
+    if (typeof c === "string" && c.trim()) return c.trim();
+    if (c && typeof c === "object") return c.hex || c.color || c.value || c.code || "";
+    return "";
+  }).filter(Boolean);
+  return parsed.length ? parsed : FALLBACK_COLORS;
 }
 
-function applyBrandTitle() {
-  document.title = "度尺批改";
-  document.querySelectorAll("header, nav, .navbar, .topbar, h1, a, span, strong, div, button").forEach(el => {
-    if (el.children.length === 0 && el.textContent) {
-      const txt = el.textContent.trim();
-      if (txt === "MEASURING") el.textContent = "度尺批改";
-      else if (txt === "登入" && (el.tagName === "BUTTON" || el.tagName === "A")) el.style.display = "none";
+export class MeasureCanvas {
+  constructor(container, imageUrl, initialData, colors, onChange, navOpts = {}) {
+    this.container = container;
+    this.imageUrl = imageUrl;
+    this.lines = Array.isArray(initialData?.lines) ? initialData.lines : [];
+    this.markers = Array.isArray(initialData?.markers) ? initialData.markers : [];
+    this.paths = Array.isArray(initialData?.paths) ? initialData.paths : [];
+    this.arrows = Array.isArray(initialData?.arrows) ? initialData.arrows : [];
+    this.stickers = Array.isArray(initialData?.stickers) ? initialData.stickers : [];
+    this.overlays = Array.isArray(initialData?.overlays) ? initialData.overlays : [];
+    this.overlayImageCache = new Map();
+    this.colors = normalizeColorList(colors);
+    this.onChange = onChange;
+    this.navOpts = navOpts;
+
+    this.mode = "VIEW";
+    this.multiSelectMode = false;
+    this.activeColor = this.colors[0] || "#DC2626";
+    this.strokeWidth = 1.5;
+    this.fontSize = 18;
+    this.whiteBg = false;
+    this.selectedItems = [];
+    this.undoStack = [];
+
+    this.scale = 1;
+    this.fitScale = 1;
+    this.offsetX = 0;
+    this.offsetY = 0;
+    this.isPanning = false;
+    this.panStart = { x: 0, y: 0 };
+    this.isDrawing = false;
+    this.draftObj = null;
+    this.dragGroupState = null;
+    this.marqueeRect = null;
+    this.lastTapTime = 0;
+    this.lastTapPos = null;
+    this.pinchDist = 0;
+
+    this.activePhraseCat = "全部";
+    this.activeRulerCat = "高";
+    this.pendingArrowAction = null;
+    this.pendingPlainTextAction = null;
+    this.pendingRulerAction = null;
+    this.selectedArrowStatus = "NEED_FIX";
+
+    this.bgImg = new Image();
+    this.bgImg.crossOrigin = "anonymous";
+    this.bgImg.onload = () => {
+      this.fitImageToScreen();
+      this.render();
+    };
+    this.bgImg.src = imageUrl;
+
+    this.buildDOM();
+    this.bindEvents();
+  }
+
+  isItemSelected(type, index) {
+    return this.selectedItems.some(s => s.type === type && s.index === index);
+  }
+
+  setSingleSelection(item) {
+    this.selectedItems = item ? [item] : [];
+  }
+
+  toggleSelectionItem(item) {
+    if (!item) return;
+    const idx = this.selectedItems.findIndex(s => s.type === item.type && s.index === item.index);
+    if (idx >= 0) this.selectedItems.splice(idx, 1);
+    else this.selectedItems.push(item);
+  }
+
+  isAnyEditorOpen() {
+    const plainOpen = this.plainTextBox && !this.plainTextBox.classList.contains("hidden");
+    const arrowOpen = this.arrowBox && !this.arrowBox.classList.contains("hidden");
+    const rulerOpen = this.rulerBox && !this.rulerBox.classList.contains("hidden");
+    return Boolean(plainOpen || arrowOpen || rulerOpen);
+  }
+
+  getAdaptiveFontSize(basePx = 18) {
+    const zoomRatio = Math.max(0.8, this.scale / Math.max(0.05, this.fitScale || 1));
+    return Math.min(72, Math.max(basePx, Math.round(basePx * zoomRatio)));
+  }
+
+  getPhraseBank() {
+    return typeof this.navOpts.getPhraseBank === "function" ? (this.navOpts.getPhraseBank() || []) : [];
+  }
+
+  getStampGroups() {
+    return typeof this.navOpts.getStampGroups === "function" ? (this.navOpts.getStampGroups() || []) : [];
+  }
+
+  getOverlayImageElement(src) {
+    if (!src) return null;
+    if (this.overlayImageCache.has(src)) return this.overlayImageCache.get(src);
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => this.render();
+    img.src = src;
+    this.overlayImageCache.set(src, img);
+    return img;
+  }
+
+  addPhotoOverlay(dataUrl) {
+    if (!dataUrl) return;
+    const img = new Image();
+    img.onload = () => {
+      this.pushUndoSnapshot();
+      const baseW = this.bgImg?.naturalWidth || 1200;
+      const baseH = this.bgImg?.naturalHeight || 900;
+      const targetW = Math.min(baseW * 0.36, img.naturalWidth || 400);
+      const ratio = (img.naturalHeight || 300) / Math.max(1, img.naturalWidth || 400);
+      const targetH = targetW * ratio;
+      this.overlays.push({ x: baseW * 0.5, y: baseH * 0.5, w: targetW, h: targetH, src: dataUrl });
+      this.overlayImageCache.set(dataUrl, img);
+      this.setSingleSelection({ type: "overlay", index: this.overlays.length - 1 });
+      this.setMode("SELECT_SINGLE");
+      this.updateNearToolbar();
+      this.emitSave();
+      this.render();
+    };
+    img.src = dataUrl;
+  }
+
+  async flattenSelectedItemsIntoBase() {
+    if (!this.selectedItems.length) return;
+    this.pushUndoSnapshot();
+
+    const baseW = this.bgImg?.naturalWidth || 1600;
+    const baseH = this.bgImg?.naturalHeight || 1200;
+    const off = document.createElement("canvas");
+    off.width = baseW;
+    off.height = baseH;
+    const octx = off.getContext("2d");
+
+    if (this.whiteBg) {
+      octx.fillStyle = "#FFFFFF";
+      octx.fillRect(0, 0, baseW, baseH);
+    } else if (this.bgImg && this.bgImg.complete && this.bgImg.naturalWidth) {
+      octx.drawImage(this.bgImg, 0, 0, baseW, baseH);
     }
-  });
-}
-applyBrandTitle();
 
-function cleanProjectTitle(name) {
-  return String(name || "").replace(/\s*\(\d{5,8}\)\s*/g, " ").replace(/\s+/g, " ").trim();
-}
+    const renderScale = Math.max(0.2, this.scale || 1);
 
-function getHiddenIds() {
-  try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_STORAGE_KEY) || "[]")); } catch (_) { return new Set(); }
-}
-function saveHiddenIds(setObj) { localStorage.setItem(HIDDEN_STORAGE_KEY, JSON.stringify(Array.from(setObj))); }
+    for (const targetItem of this.selectedItems) {
+      const { type, index } = targetItem;
+      const obj = this.getObjectByTypeAndIndex(type, index);
+      if (!obj) continue;
 
-function getLocalProjects() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(LOCAL_ACTIVE_KEY) || "[]");
-    return Array.isArray(raw) ? raw : [];
-  } catch (_) { return []; }
-}
-
-function saveLocalProjects(list) {
-  const slimList = (list || []).map(p => ({
-    ...p,
-    pages: (p.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }))
-  }));
-  localStorage.setItem(LOCAL_ACTIVE_KEY, JSON.stringify(slimList));
-}
-
-function upsertLocalProject(proj) {
-  if (!proj || !proj.id) return;
-  const list = getLocalProjects();
-  const cleanSlim = { ...proj, pages: (proj.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" })) };
-  const idx = list.findIndex(x => x.id === proj.id);
-  if (proj.archived === true) { if (idx >= 0) list.splice(idx, 1); }
-  else if (idx >= 0) list[idx] = cleanSlim;
-  else list.unshift(cleanSlim);
-  saveLocalProjects(list);
-}
-
-function removeLocalProjectById(pid) { saveLocalProjects(getLocalProjects().filter(x => x.id !== pid)); }
-
-function countProjectAnnotations(proj) {
-  let total = 0;
-  (proj.pages || []).forEach(p => {
-    total += (p.lines || []).length + (p.markers || []).length + (p.paths || []).length + (p.arrows || []).length + (p.stickers || []).length;
-  });
-  return total;
-}
-
-function formatUpdatedTime(ts) {
-  if (!ts) return "未記錄時間";
-  const d = new Date(Number(ts));
-  if (Number.isNaN(d.getTime())) return "未記錄時間";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-function parseMapQueryFromTitle(title) {
-  return encodeURIComponent(`香港 ${cleanProjectTitle(title).replace(/傢俬圖|尺吋圖|平面圖|度尺/g, "").trim()}`);
-}
-
-function formatWhatsAppUrl(phone) {
-  const digits = String(phone || "").replace(/\D/g, "");
-  if (!digits) return "";
-  return `https://wa.me/${digits.length === 8 ? `852${digits}` : digits}`;
-}
-
-function dedupProjects(rawProjects) {
-  const dedupMap = new Map();
-  rawProjects.forEach(p => {
-    const key = p.legacySourceId ? `SRC_${p.legacySourceId}` : `NAME_${cleanProjectTitle(p.name)}`;
-    const existing = dedupMap.get(key);
-    if (!existing) dedupMap.set(key, p);
-    else {
-      const scoreNew = countProjectAnnotations(p) * 1000000 + (p.updatedAt || 0);
-      const scoreOld = countProjectAnnotations(existing) * 1000000 + (existing.updatedAt || 0);
-      if (scoreNew > scoreOld) dedupMap.set(key, p);
-    }
-  });
-  return Array.from(dedupMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-}
-
-async function loadCloudDictionaryFromDB() {
-  try {
-    const snap = await getDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID));
-    if (snap.exists()) {
-      const data = snap.data();
-      if (Array.isArray(data.stampGroups)) cloudStampGroups = data.stampGroups;
-      if (Array.isArray(data.phraseBank)) cloudPhraseBank = data.phraseBank;
-      if (Array.isArray(data.presetSpaces) && data.presetSpaces.length) cloudPresetSpaces = data.presetSpaces;
-    } else if (masterDict) {
-      if (Array.isArray(masterDict.stampGroups)) cloudStampGroups = masterDict.stampGroups;
-      if (Array.isArray(masterDict.spaceGroups)) {
-        const dictSpaces = masterDict.spaceGroups.flatMap(g => (g.items || []).map(i => i.name));
-        if (dictSpaces.length) cloudPresetSpaces = [...new Set(["總圖", ...dictSpaces])];
+      if (type === "overlay") {
+        const im = this.getOverlayImageElement(obj.src);
+        if (im && im.complete && im.naturalWidth) {
+          octx.save();
+          octx.drawImage(im, obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
+          octx.strokeStyle = "#94A3B8";
+          octx.lineWidth = 3;
+          octx.strokeRect(obj.x - obj.w / 2, obj.y - obj.h / 2, obj.w, obj.h);
+          octx.restore();
+        }
+      } else if (type === "marker") {
+        const fs = (obj.fontSize || 18) / renderScale;
+        octx.save();
+        octx.font = `800 ${fs}px sans-serif`;
+        const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
+        const padX = 6 / renderScale;
+        const padY = 4 / renderScale;
+        const w = wText + padX * 2;
+        const h = fs + padY * 2;
+        octx.fillStyle = "rgba(255,255,255,0.82)";
+        octx.beginPath();
+        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
+        octx.fill();
+        octx.textAlign = "center";
+        octx.textBaseline = "middle";
+        octx.fillStyle = obj.color || "#DC2626";
+        octx.fillText(obj.text || "", obj.x, obj.y);
+        octx.restore();
+      } else if (type === "sticker") {
+        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 15, 0.78, renderScale);
+      } else if (type === "line") {
+        octx.save();
+        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        octx.strokeStyle = obj.color || "#2563EB";
+        octx.lineWidth = sw;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x2, obj.y2);
+        octx.stroke();
+        if (obj.text) {
+          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 15, 0.9, renderScale);
+        }
+        octx.restore();
+      } else if (type === "arrow") {
+        octx.save();
+        const col = obj.color || "#DC2626";
+        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        octx.strokeStyle = col;
+        octx.fillStyle = col;
+        octx.lineWidth = sw;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x2, obj.y2);
+        octx.stroke();
+        const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
+        const headLen = 12 / renderScale;
+        octx.beginPath();
+        octx.moveTo(obj.x1, obj.y1);
+        octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
+        octx.lineTo(obj.x1 - headLen * Math.cos(ang + Math.PI / 6), obj.y1 - headLen * Math.sin(ang + Math.PI / 6));
+        octx.closePath();
+        octx.fill();
+        if (obj.text) {
+          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 16, 0.8, renderScale);
+        }
+        octx.restore();
+      } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
+        octx.save();
+        octx.strokeStyle = obj.color || "#DC2626";
+        octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
+        octx.lineCap = "round";
+        octx.lineJoin = "round";
+        octx.beginPath();
+        octx.moveTo(obj.points[0].x, obj.points[0].y);
+        for (let i = 1; i < obj.points.length; i++) octx.lineTo(obj.points[i].x, obj.points[i].y);
+        octx.stroke();
+        octx.restore();
       }
     }
-  } catch (_) {}
-}
 
-async function saveCloudDictionaryToDB() {
-  await setDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID), {
-    stampGroups: cloudStampGroups,
-    phraseBank: cloudPhraseBank,
-    presetSpaces: cloudPresetSpaces,
-    updatedAt: Date.now()
-  });
-}
+    const sortedDesc = [...this.selectedItems].sort((a, b) => b.index - a.index);
+    sortedDesc.forEach(it => this.deleteObjectAt(it.type, it.index));
 
-function getSeedTemplatesForDB() {
-  return {
-    stampGroups: [
-      { name: "電掣", items: ["13A單蘇", "13A孖蘇", "燈掣", "雙控掣", "數據掣", "電視掣", "冷氣掣", "曲架掣", "電箱"] },
-      { name: "水煤", items: ["冷水喉", "熱水喉", "去水位", "地台去水", "煤氣掣", "煤氣錶"] },
-      { name: "收口/結構", items: ["收口條", "見光板", "石膏線", "燈槽", "假天花底", "橫樑陣位", "柱位", "暗門", "地腳線"] }
-    ],
-    phraseBank: [
-      { cat: "搬運收口", text: "⚠️ 超出2300mm電梯上限，必須標註分件接駁" },
-      { cat: "搬運收口", text: "⚠️ 核對大廈後樓梯轉角能否搬運" },
-      { cat: "搬運收口", text: "⚠️ 兩牆之間做死數(0mm)，確認現場垂直度" },
-      { cat: "搬運收口", text: "⚠️ 頂部無留20mm收口條，天花不平會出現大小縫" },
-      { cat: "搬運收口", text: "⚠️ 貼牆櫃背需切15×100mm缺口避原裝地腳線" },
-      { cat: "搬運收口", text: "⚠️ 踢腳高度需拉平全屋統一地腳線" },
-      { cat: "搬運收口", text: "⚠️ 走廊剩餘通道<750mm，影響通行及搬運" },
-      { cat: "搬運收口", text: "⚠️ 懸空櫃離地50-100mm尷尬位，掃地機進不去" },
-      { cat: "搬運收口", text: "🚨 石膏板/空心牆無法直接掛重型吊櫃" },
-      { cat: "搬運收口", text: "⚠️ 櫃體撞陣柱，需做切角或降高避讓" },
-      { cat: "門窗碰撞", text: "🚨 趟門衣櫃總深不足580mm，扣除路軌掛衫關不上門" },
-      { cat: "門窗碰撞", text: "⚠️ 掩門高>2000mm易彎曲，需加裝暗藏拉直器" },
-      { cat: "門窗碰撞", text: "⚠️ 拍門器需留足3mm回彈縫否則彈不出" },
-      { cat: "門窗碰撞", text: "🚨 掩門內抽側板需加25mm墊厚條避門鉸" },
-      { cat: "門窗碰撞", text: "🚨 L型轉角兩門相交需加40×40mm收口柱防互撞" },
-      { cat: "門窗碰撞", text: "⚠️ 靠床掩門下段會撞床頭櫃，建議改上下分段門" },
-      { cat: "門窗碰撞", text: "🚨 油壓床板向上揭起時會撞到吸頂燈或冷氣機" },
-      { cat: "門窗碰撞", text: "⚠️ 玄關鞋櫃距大門框<120mm，開門門鎖會撞側板" },
-      { cat: "門窗碰撞", text: "⚠️ 書枱/餐櫃後方淨空<750mm，椅子無法拉出轉身" },
-      { cat: "門窗碰撞", text: "⚠️ 浴屏外開掩門打開時會撞到浴室櫃" },
-      { cat: "水電冷氣", text: "🚨 插蘇位被固定層板/抽屜軌擋住無法插電" },
-      { cat: "水電冷氣", text: "⚠️ 牆身燈掣被櫃身遮擋，需改位或開側板孔" },
-      { cat: "水電冷氣", text: "⚠️ 電箱藏櫃內，內部層板必須做活動可拆" },
-      { cat: "水電冷氣", text: "⚠️ 掛牆電視至地櫃需設50mm暗藏穿線管開孔" },
-      { cat: "水電冷氣", text: "🚨 高櫃距分體冷氣頂<150mm，遮擋迴風會滴水" },
-      { cat: "水電冷氣", text: "⚠️ 背板貼牆有冷氣去水喉，需開凹槽避讓防壓爆" },
-      { cat: "水電冷氣", text: "🚨 LED燈帶火牛必須放活動層板或可拆蓋板內檢修" },
-      { cat: "水電冷氣", text: "🚨 高櫃頂距消防花灑頭<500mm，違反安全距離" },
-      { cat: "水電冷氣", text: "🚨 煤氣櫃門必須設通風百葉孔及檢修空間" },
-      { cat: "水電冷氣", text: "⚠️ 床褥或軟包高度會遮擋牆身床頭充電插蘇" },
-      { cat: "廚浴電器", text: "🚨 雪櫃左右及頂部各需留30mm散熱縫" },
-      { cat: "廚浴電器", text: "🚨 雪櫃貼牆側需留≥50mm門縫收口才能開90°門" },
-      { cat: "廚浴電器", text: "🚨 焗爐/蒸焗爐櫃身淨深需≥電器深度+60mm" },
-      { cat: "廚浴電器", text: "🚨 洗衣機櫃淨深需≥機身深度+80mm容納來去水喉" },
-      { cat: "廚浴電器", text: "⚠️ 抽油煙機吊櫃頂需設假身包管遮擋排氣喉" },
-      { cat: "廚浴電器", text: "🚨 內開廚房窗打開會撞到星盆高身水龍頭" },
-      { cat: "廚浴電器", text: "🚨 星盆櫃層板需預留U型去水隔氣喉缺口" },
-      { cat: "廚浴電器", text: "🚨 廚櫃星盆櫃/浴室櫃潮濕區必須用防水夾板" },
-      { cat: "廚浴電器", text: "🚨 浴室櫃不可木板直接落地，需離地≥250mm或防水腳" },
-      { cat: "廚浴電器", text: "⚠️ 鏡櫃底距洗手盆面<350mm，外開掩門會撞龍頭" }
-    ]
-  };
-}
+    const mergedDataUrl = off.toDataURL("image/jpeg", 0.88);
+    this.selectedItems = [];
+    this.updateNearToolbar();
+    this.imageUrl = mergedDataUrl;
+    this.bgImg = new Image();
+    this.bgImg.onload = () => this.render();
+    this.bgImg.src = mergedDataUrl;
 
-function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
-  let activeTab = initialTab;
-  const existing = document.getElementById("cloud-dict-modal");
-  if (existing) existing.remove();
+    if (typeof this.navOpts.onBaseImageMerged === "function") {
+      await this.navOpts.onBaseImageMerged(mergedDataUrl);
+    }
+    this.emitSave();
+    this.render();
+  }
 
-  const overlay = document.createElement("div");
-  overlay.id = "cloud-dict-modal";
-  overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.55); display:flex; align-items:center; justify-content:center; z-index:1200; padding:12px;";
+  pushUndoSnapshot() {
+    const snap = JSON.stringify({
+      imageUrl: this.imageUrl,
+      lines: this.lines,
+      markers: this.markers,
+      paths: this.paths,
+      arrows: this.arrows,
+      stickers: this.stickers,
+      overlays: this.overlays
+    });
+    this.undoStack.push(snap);
+    if (this.undoStack.length > 35) this.undoStack.shift();
+    this.updateUndoButtonState();
+  }
 
-  const renderModalContent = () => {
-    overlay.innerHTML = `
-      <div style="width:min(540px, 96vw); max-height:86vh; background:#FFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 40px rgba(0,0,0,0.3);">
-        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:8px;">
-          <strong style="font-size:15px; color:#0F172A;">⚙️ 雲端預設空間與詞庫管理</strong>
-          <button id="cdm-close" style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:3px 9px; font-size:12px; font-weight:700; cursor:pointer;">完成關閉</button>
-        </div>
+  async undo() {
+    if (!this.undoStack.length) return;
+    const prev = JSON.parse(this.undoStack.pop());
+    this.lines = prev.lines || [];
+    this.markers = prev.markers || [];
+    this.paths = prev.paths || [];
+    this.arrows = prev.arrows || [];
+    this.stickers = prev.stickers || [];
+    this.overlays = prev.overlays || [];
+    if (prev.imageUrl && prev.imageUrl !== this.imageUrl) {
+      this.imageUrl = prev.imageUrl;
+      this.bgImg = new Image();
+      this.bgImg.onload = () => this.render();
+      this.bgImg.src = prev.imageUrl;
+      if (typeof this.navOpts.onBaseImageMerged === "function") {
+        await this.navOpts.onBaseImageMerged(prev.imageUrl);
+      }
+    }
+    this.selectedItems = [];
+    this.updateNearToolbar();
+    this.updateUndoButtonState();
+    this.emitSave();
+    this.render();
+  }
 
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
-          <div style="display:flex; gap:5px; flex-wrap:wrap;">
-            <button id="cdm-tab-space" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "SPACE" ? "#059669" : "#CBD5E1"}; background:${activeTab === "SPACE" ? "#059669" : "#F8FAFC"}; color:${activeTab === "SPACE" ? "#FFF" : "#334155"};">
-              預設空間 (${cloudPresetSpaces.length})
-            </button>
-            <button id="cdm-tab-stamp" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "STAMP" ? "#0F172A" : "#CBD5E1"}; background:${activeTab === "STAMP" ? "#0F172A" : "#F8FAFC"}; color:${activeTab === "STAMP" ? "#FFF" : "#334155"};">
-              現場詞庫 (${cloudStampGroups.reduce((a, g) => a + (g.items || []).length, 0)})
-            </button>
-            <button id="cdm-tab-phrase" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "PHRASE" ? "#2563EB" : "#CBD5E1"}; background:${activeTab === "PHRASE" ? "#2563EB" : "#F8FAFC"}; color:${activeTab === "PHRASE" ? "#FFF" : "#334155"};">
-              批改短語庫 (${cloudPhraseBank.length})
-            </button>
-          </div>
-          <button id="cdm-seed-btn" style="background:#FEF3C7; color:#92400E; border:1px solid #F59E0B; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:700; cursor:pointer;">
-            匯入範本至雲端DB
-          </button>
-        </div>
+  updateUndoButtonState() {
+    const btn = this.rootEl?.querySelector(".mc-undo-btn");
+    if (!btn) return;
+    btn.disabled = this.undoStack.length === 0;
+    btn.style.opacity = this.undoStack.length === 0 ? "0.4" : "1";
+  }
 
-        <div id="cdm-body" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px;"></div>
-      </div>
-    `;
-
-    overlay.querySelector("#cdm-close").onclick = () => {
-      overlay.remove();
-      if (typeof onCloseRefresh === "function") onCloseRefresh();
-    };
-    overlay.querySelector("#cdm-tab-space").onclick = () => { activeTab = "SPACE"; renderModalContent(); };
-    overlay.querySelector("#cdm-tab-stamp").onclick = () => { activeTab = "STAMP"; renderModalContent(); };
-    overlay.querySelector("#cdm-tab-phrase").onclick = () => { activeTab = "PHRASE"; renderModalContent(); };
-    overlay.querySelector("#cdm-seed-btn").onclick = async () => {
-      if (!confirm("確定將標準「電掣/水煤/收口詞庫」及「40條審圖短語」寫入 Firebase 雲端資料庫嗎？")) return;
-      const seed = getSeedTemplatesForDB();
-      if (!cloudStampGroups.length) cloudStampGroups = seed.stampGroups;
-      if (!cloudPhraseBank.length) cloudPhraseBank = seed.phraseBank;
-      await saveCloudDictionaryToDB();
-      renderModalContent();
-    };
-
-    const bodyEl = overlay.querySelector("#cdm-body");
-    if (activeTab === "SPACE") {
-      bodyEl.innerHTML = `
-        <div style="display:flex; gap:5px;">
-          <input type="text" id="cdm-sp-word" placeholder="輸入新預設空間（如：衣帽間 / 儲物房 / 工人廁）" style="flex:1; padding:6px 8px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <button id="cdm-sp-add" class="btn-solid btn-sm" style="background:#059669; border-color:#059669;">+ 新增空間</button>
-        </div>
-        <div style="display:flex; flex-wrap:wrap; gap:6px; padding:6px 0;">
-          ${cloudPresetSpaces.map((sp, idx) => `
-            <span style="display:inline-flex; align-items:center; gap:5px; background:#F0FDF4; border:1px solid #86EFAC; color:#166534; border-radius:999px; padding:3px 10px; font-size:12px; font-weight:700;">
-              ${sp}
-              <button class="cdm-del-sp" data-spidx="${idx}" style="background:none; border:none; color:#15803D; cursor:pointer; padding:0; font-weight:800;">✕</button>
-            </span>
-          `).join("")}
-        </div>
-      `;
-      bodyEl.querySelector("#cdm-sp-add").onclick = async () => {
-        const w = (bodyEl.querySelector("#cdm-sp-word").value || "").trim();
-        if (!w || cloudPresetSpaces.includes(w)) return;
-        cloudPresetSpaces.push(w);
-        await saveCloudDictionaryToDB();
-        renderModalContent();
-      };
-      bodyEl.querySelectorAll(".cdm-del-sp").forEach(b => {
-        b.onclick = async () => {
-          cloudPresetSpaces.splice(Number(b.dataset.spidx), 1);
-          await saveCloudDictionaryToDB();
-          renderModalContent();
-        };
-      });
-    } else if (activeTab === "STAMP") {
-      bodyEl.innerHTML = `
-        <div style="display:flex; gap:5px; flex-wrap:wrap;">
-          <input type="text" id="cdm-st-cat" placeholder="分類（如：電掣 / 水煤 / 收口）" style="width:130px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <input type="text" id="cdm-st-word" placeholder="新詞彙（如：13A單蘇 / 煤氣錶）" style="flex:1; min-width:140px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <button id="cdm-st-add" class="btn-solid btn-sm">+ 存入雲端</button>
-        </div>
-        ${cloudStampGroups.map((g, gIdx) => `
-          <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-              <strong style="font-size:13px; color:#0F172A;">${g.name}</strong>
-              <button class="cdm-del-group" data-gidx="${gIdx}" style="background:none; border:none; color:#DC2626; font-size:11px; cursor:pointer;">刪除整組</button>
-            </div>
-            <div style="display:flex; flex-wrap:wrap; gap:5px;">
-              ${(g.items || []).map((w, wIdx) => `
-                <span style="display:inline-flex; align-items:center; gap:4px; background:#FFF; border:1px solid #CBD5E1; border-radius:5px; padding:2px 7px; font-size:12px;">
-                  ${w}
-                  <button class="cdm-del-word" data-gidx="${gIdx}" data-widx="${wIdx}" style="background:none; border:none; color:#94A3B8; cursor:pointer; padding:0;">✕</button>
-                </span>
-              `).join("")}
-            </div>
-          </div>
-        `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有詞彙，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
-      `;
-
-      bodyEl.querySelector("#cdm-st-add").onclick = async () => {
-        const cat = (bodyEl.querySelector("#cdm-st-cat").value || "常用").trim();
-        const word = (bodyEl.querySelector("#cdm-st-word").value || "").trim();
-        if (!word) return;
-        let grp = cloudStampGroups.find(x => x.name === cat);
-        if (!grp) { grp = { name: cat, items: [] }; cloudStampGroups.push(grp); }
-        if (!grp.items.includes(word)) grp.items.push(word);
-        await saveCloudDictionaryToDB();
-        renderModalContent();
-      };
-      bodyEl.querySelectorAll(".cdm-del-word").forEach(b => {
-        b.onclick = async () => {
-          cloudStampGroups[Number(b.dataset.gidx)].items.splice(Number(b.dataset.widx), 1);
-          await saveCloudDictionaryToDB();
-          renderModalContent();
-        };
-      });
-      bodyEl.querySelectorAll(".cdm-del-group").forEach(b => {
-        b.onclick = async () => {
-          cloudStampGroups.splice(Number(b.dataset.gidx), 1);
-          await saveCloudDictionaryToDB();
-          renderModalContent();
-        };
-      });
+  setMode(newMode) {
+    if (newMode === "SELECT_SINGLE") {
+      this.mode = "SELECT";
+      this.multiSelectMode = false;
+      if (this.selectedItems.length > 1) {
+        this.selectedItems = [this.selectedItems[this.selectedItems.length - 1]];
+      }
+    } else if (newMode === "SELECT_MULTI") {
+      this.mode = "SELECT";
+      this.multiSelectMode = true;
     } else {
-      bodyEl.innerHTML = `
-        <div style="display:flex; gap:5px; flex-wrap:wrap;">
-          <input type="text" id="cdm-ph-cat" placeholder="分類（如：搬運收口）" style="width:110px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <input type="text" id="cdm-ph-txt" placeholder="新批改短語..." style="flex:1; min-width:150px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <button id="cdm-ph-add" class="btn-solid btn-sm">+ 存入雲端</button>
-        </div>
-        <div style="display:flex; flex-direction:column; gap:4px;">
-          ${cloudPhraseBank.map((p, idx) => `
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px; padding:5px 8px; font-size:12px;">
-              <div>
-                <span style="font-size:10px; background:#DBEAFE; color:#1D4ED8; padding:1px 5px; border-radius:3px; font-weight:700; margin-right:5px;">${p.cat || "常用"}</span>
-                <span>${p.text}</span>
-              </div>
-              <div style="display:flex; gap:4px;">
-                <button class="cdm-ph-edit" data-idx="${idx}" style="background:none; border:none; color:#475569; cursor:pointer; font-size:11px;">改</button>
-                <button class="cdm-ph-del" data-idx="${idx}" style="background:none; border:none; color:#DC2626; cursor:pointer; font-size:12px;">✕</button>
-              </div>
-            </div>
-          `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有短語，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
-        </div>
-      `;
-
-      bodyEl.querySelector("#cdm-ph-add").onclick = async () => {
-        const cat = (bodyEl.querySelector("#cdm-ph-cat").value || "常用").trim();
-        const txt = (bodyEl.querySelector("#cdm-ph-txt").value || "").trim();
-        if (!txt) return;
-        cloudPhraseBank.unshift({ cat, text: txt });
-        await saveCloudDictionaryToDB();
-        renderModalContent();
-      };
-      bodyEl.querySelectorAll(".cdm-ph-edit").forEach(b => {
-        b.onclick = async () => {
-          const idx = Number(b.dataset.idx);
-          const next = prompt("修改短語：", cloudPhraseBank[idx].text);
-          if (next && next.trim()) {
-            cloudPhraseBank[idx].text = next.trim();
-            await saveCloudDictionaryToDB();
-            renderModalContent();
-          }
-        };
-      });
-      bodyEl.querySelectorAll(".cdm-ph-del").forEach(b => {
-        b.onclick = async () => {
-          cloudPhraseBank.splice(Number(b.dataset.idx), 1);
-          await saveCloudDictionaryToDB();
-          renderModalContent();
-        };
-      });
+      this.mode = newMode;
+      this.multiSelectMode = false;
     }
-  };
 
-  document.body.appendChild(overlay);
-  renderModalContent();
-}
+    this.rootEl.querySelectorAll(".mc-tool-btn").forEach(b => {
+      const m = b.dataset.mode;
+      const isAct = (m === newMode) || (newMode === "SELECT" && !this.multiSelectMode && m === "SELECT_SINGLE") || (newMode === "SELECT" && this.multiSelectMode && m === "SELECT_MULTI");
+      b.classList.toggle("active", isAct);
+    });
 
-function openQuickReassignModal(page, projectSpaces, onUpdated) {
-  const existing = document.getElementById("quick-reassign-modal");
-  if (existing) existing.remove();
+    if (typeof this.navOpts.onModeSync === "function") {
+      this.navOpts.onModeSync(this.mode);
+    }
+    if (this.mode !== "SELECT" && this.mode !== "VIEW") {
+      this.selectedItems = [];
+    }
+    this.updateNearToolbar();
+    this.render();
+  }
 
-  let selectedCat = normalizePageCategory(page);
-  let selectedSpace = page.space || "未標空間";
-  const allChoices = [...new Set([...projectSpaces, ...cloudPresetSpaces])].filter(s => s && s !== "未標空間");
+  setActiveColor(col) {
+    this.activeColor = col;
+    if (this.selectedItems.length) {
+      this.pushUndoSnapshot();
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (!obj || it.type === "overlay") return;
+        obj.color = col;
+        if (it.type === "sticker") {
+          obj.bg = col === "#FFFFFF" ? "#0F172A" : col;
+          obj.color = "#FFFFFF";
+        }
+      });
+      this.emitSave();
+      this.render();
+    }
+  }
 
-  const overlay = document.createElement("div");
-  overlay.id = "quick-reassign-modal";
-  overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.52); display:flex; align-items:center; justify-content:center; z-index:1250; padding:12px;";
+  setStrokeWidth(val) {
+    this.strokeWidth = val;
+    if (this.selectedItems.length) {
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (obj && (it.type === "path" || it.type === "line" || it.type === "arrow")) {
+          obj.strokeWidth = val;
+        }
+      });
+      this.render();
+    }
+  }
 
-  const renderBox = () => {
-    overlay.innerHTML = `
-      <div style="width:min(400px, 94vw); background:#FFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:12px; box-shadow:0 20px 40px rgba(0,0,0,0.28);">
-        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:6px;">
-          <strong style="font-size:14px; color:#0F172A;">修改 ${page.pageNum || ""} 分類與所屬空間</strong>
-          <button id="qrm-close" style="background:none; border:none; color:#64748B; font-size:15px; cursor:pointer;">✕</button>
+  resetZoom() {
+    this.fitImageToScreen();
+    this.updateNearToolbar();
+    this.render();
+  }
+
+  makeFloatingBoxDraggable(boxEl, handleEl) {
+    if (!boxEl || !handleEl) return;
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let origLeft = 0;
+    let origTop = 0;
+
+    handleEl.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      origLeft = parseFloat(boxEl.style.left) || boxEl.offsetLeft;
+      origTop = parseFloat(boxEl.style.top) || boxEl.offsetTop;
+      handleEl.setPointerCapture(e.pointerId);
+    });
+
+    handleEl.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const maxL = Math.max(8, this.viewW - boxEl.offsetWidth - 8);
+      const maxT = Math.max(44, this.viewH - boxEl.offsetHeight - 8);
+      boxEl.style.left = `${Math.max(8, Math.min(maxL, origLeft + dx))}px`;
+      boxEl.style.top = `${Math.max(44, Math.min(maxT, origTop + dy))}px`;
+    });
+
+    const endDrag = () => { dragging = false; };
+    handleEl.addEventListener("pointerup", endDrag);
+    handleEl.addEventListener("pointercancel", endDrag);
+  }
+
+  buildDOM() {
+    const quickColors = this.colors.slice(0, 6);
+    this.container.innerHTML = `
+      <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none;">
+        <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC;"></canvas>
+
+        <!-- 精簡合併工具列：直接並排「單選」「多選」 -->
+        <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
+          <button class="mc-tool-btn" data-mode="RULER">拉尺</button>
+          <button class="mc-tool-btn" data-mode="PEN">畫筆</button>
+          <button class="mc-tool-btn" data-mode="TEXT">文字</button>
+          <button type="button" class="mc-overlay-pick-btn" style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">貼圖</button>
+
+          <span style="color:#CBD5E1; font-weight:300;">|</span>
+
+          <button class="mc-tool-btn active" data-mode="VIEW">檢視</button>
+          <button class="mc-tool-btn" data-mode="SELECT_SINGLE">單選</button>
+          <button class="mc-tool-btn" data-mode="SELECT_MULTI">多選</button>
+          <button class="mc-undo-btn" disabled style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; opacity:0.4;">復原</button>
+          <button class="mc-tool-btn" data-mode="ERASER">擦除</button>
         </div>
 
-        <div>
-          <div style="font-size:11px; font-weight:800; color:#475569; margin-bottom:5px;">1. 點選圖紙分類</div>
-          <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:6px;">
-            ${CORE_CATEGORIES.map(c => `
-              <button type="button" class="qrm-cat-btn" data-qcat="${c}"
-                      style="padding:6px 4px; border-radius:7px; font-size:12px; font-weight:800; cursor:pointer; border:1.5px solid ${selectedCat === c ? "#2563EB" : "#CBD5E1"}; background:${selectedCat === c ? "#DBEAFE" : "#F8FAFC"}; color:${selectedCat === c ? "#1D4ED8" : "#334155"};">
-                ${c}
+        <input type="file" class="mc-overlay-file-input hidden" accept="image/*" />
+
+        <!-- 選中物件的小工具條（支援單選與多選批量操作） -->
+        <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:35; white-space:nowrap;">
+          <span class="mc-near-count hidden" style="background:#2563EB; color:#FFF; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;">已選2項</span>
+          <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
+          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">18</span>
+          <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
+
+          <div class="mc-near-colors-wrap" style="display:flex; align-items:center; gap:3px; padding-left:4px; border-left:1px solid #475569;">
+            ${quickColors.map(c => `
+              <button type="button" class="mc-near-color" data-ncol="${c}"
+                      style="width:14px; height:14px; border-radius:50%; background-color:${c}; border:1.5px solid #94A3B8; cursor:pointer; padding:0;"></button>
+            `).join("")}
+          </div>
+
+          <button type="button" class="mc-near-merge" title="合併到底圖成為一張更新圖片" style="background:#059669; color:#FFF; border:none; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">合併到底圖</button>
+          <button type="button" class="mc-near-edit" title="改字" style="background:#334155; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">改字</button>
+          <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">刪除</button>
+        </div>
+
+        <!-- 拉高加寬版「尺寸標註」浮窗：inputmode="none" 不觸發系統鍵盤，內建專屬數字小按鍵 -->
+        <div class="mc-ruler-box hidden" style="position:absolute; width:min(410px, 95vw); background:#FFF; border:1.5px solid #0F172A; border-radius:10px; padding:8px; box-shadow:0 14px 32px rgba(15,23,42,0.28); z-index:48; display:flex; flex-direction:column; gap:7px;">
+          <div class="mc-ruler-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#F1F5F9; padding:3px 7px; border-radius:5px; cursor:grab; font-size:11px; color:#475569;">
+            <strong>⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span></strong>
+            <button type="button" class="mc-ruler-cancel" style="background:none; border:none; color:#64748B; font-size:12px; font-weight:700; cursor:pointer;">✕</button>
+          </div>
+
+          <div style="display:flex; gap:5px;">
+            <input type="text" inputmode="none" class="mc-ruler-input" placeholder="點下方數字 / 詞彙（不彈系統鍵盤）"
+                   style="flex:1; min-width:0; padding:6px 9px; border:1.5px solid #2563EB; border-radius:6px; font-size:14px; font-weight:700; background:#FFF;" />
+            <button type="button" class="mc-ruler-ok" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:6px 14px; font-size:12px; font-weight:800; cursor:pointer;">確定</button>
+          </div>
+
+          <!-- 內建防遮擋數字鍵盤（完全不觸發 iOS / Android 系統鍵盤） -->
+          <div class="mc-ruler-numpad" style="display:grid; grid-template-columns:repeat(7, 1fr); gap:3px; background:#F1F5F9; padding:4px; border-radius:6px; border:1px solid #CBD5E1;">
+            ${["1","2","3","4","5","6","7","8","9","0",".","×","⌫","清空"].map(k => `
+              <button type="button" class="mc-rnum-btn" data-rnum="${k}"
+                      style="background:${k === "⌫" || k === "清空" ? "#E2E8F0" : "#FFF"}; color:#0F172A; border:1px solid #CBD5E1; border-radius:4px; padding:5px 0; font-size:13px; font-weight:800; cursor:pointer;">
+                ${k}
               </button>
             `).join("")}
           </div>
-        </div>
 
-        <div>
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
-            <span style="font-size:11px; font-weight:800; color:#475569;">2. 點選所屬空間</span>
-            <button type="button" id="qrm-manage-sp" style="background:none; border:none; color:#2563EB; font-size:11px; font-weight:700; cursor:pointer;">⚙️ 管理預設空間</button>
+          <!-- 智慧分格尺寸輸入區（點選 (闊高厚)/(闊高深)/(高厚)/(闊高) 自動展開） -->
+          <div class="mc-ruler-split-box hidden" style="background:#EFF6FF; border:1.5px solid #3B82F6; border-radius:7px; padding:6px; display:flex; flex-direction:column; gap:5px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <strong class="mc-rsplit-title" style="font-size:12px; color:#1E40AF;">明喉</strong>
+              <button type="button" class="mc-rsplit-close" style="background:none; border:none; color:#64748B; font-size:11px; cursor:pointer;">收起</button>
+            </div>
+            <div class="mc-rsplit-inputs" style="display:flex; align-items:center; gap:4px;"></div>
           </div>
-          <div style="display:flex; flex-wrap:wrap; gap:6px; max-height:190px; overflow-y:auto;">
-            ${allChoices.map(sp => `
-              <button type="button" class="qrm-sp-btn" data-qsp="${sp}"
-                      style="padding:5px 11px; border-radius:999px; font-size:12px; font-weight:700; cursor:pointer; border:1.5px solid ${selectedSpace === sp ? "#0F172A" : "#CBD5E1"}; background:${selectedSpace === sp ? "#0F172A" : "#FFF"}; color:${selectedSpace === sp ? "#FFF" : "#1E293B"};">
-                ${sp}
+
+          <div style="display:flex; flex-wrap:wrap; gap:4px;">
+            ${RULER_QUICK_WORDS.map(w => `
+              <button type="button" class="mc-rword-btn" data-rword="${w}"
+                      style="background:#EFF6FF; color:#1D4ED8; border:1px solid #BFDBFE; border-radius:5px; padding:3px 9px; font-size:12px; font-weight:800; cursor:pointer;">
+                ${w}
               </button>
             `).join("")}
           </div>
+
+          <!-- 動態渲染：高 / 留位 / 構造 + 電掣 / 水煤 / 收口/結構 等雲端詞庫分類 -->
+          <div class="mc-ruler-cats" style="display:flex; flex-wrap:wrap; gap:4px; border-top:1px solid #E2E8F0; padding-top:6px;"></div>
+
+          <!-- 拉高詞彙區至 220px，減少滾動 -->
+          <div class="mc-ruler-items" style="max-height:220px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:5px; background:#F8FAFC; padding:7px; border-radius:6px; border:1px solid #E2E8F0;"></div>
+
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <button type="button" class="mc-ruler-cancel-btn" style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; border-radius:4px; padding:3px 9px; font-size:11px; cursor:pointer;">取消</button>
+            <button type="button" class="mc-ruler-dict-btn" style="background:#EFF6FF; color:#1D4ED8; border:1px solid #93C5FD; border-radius:4px; padding:3px 9px; font-size:11px; font-weight:700; cursor:pointer;">詞庫</button>
+          </div>
         </div>
 
-        <div style="display:flex; justify-content:flex-end; gap:6px; border-top:1px solid #E2E8F0; padding-top:8px;">
-          <button id="qrm-cancel" class="btn-outline btn-sm">取消</button>
-          <button id="qrm-save" class="btn-solid btn-sm">確定套用</button>
+        <!-- 普通純打字極簡小框 -->
+        <div class="mc-plain-text-box hidden" style="position:absolute; width:min(220px, 84vw); background:#FFF; border:1.5px solid #0F172A; border-radius:8px; padding:6px; box-shadow:0 8px 20px rgba(15,23,42,0.2); z-index:46; display:flex; flex-direction:column; gap:5px;">
+          <input type="text" class="mc-plain-input" placeholder="輸入文字或數字..."
+                 style="width:100%; box-sizing:border-box; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:13px;" />
+          <div style="display:flex; justify-content:flex-end; gap:5px;">
+            <button type="button" class="mc-plain-cancel" style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:4px; padding:2px 8px; font-size:11px; cursor:pointer;">取消</button>
+            <button type="button" class="mc-plain-ok" style="background:#0F172A; color:#FFF; border:none; border-radius:4px; padding:2px 9px; font-size:11px; font-weight:700; cursor:pointer;">確定</button>
+          </div>
         </div>
+
+        <!-- 拉高版「箭頭批改」浮窗 -->
+        <div class="mc-arrow-box hidden" style="position:absolute; width:min(330px, 92vw); background:#FFF; border:1.5px solid #2563EB; border-radius:9px; padding:7px; box-shadow:0 12px 28px rgba(15,23,42,0.24); z-index:45; display:flex; flex-direction:column; gap:6px;">
+          <div class="mc-arrow-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#EFF6FF; padding:3px 6px; border-radius:4px; cursor:grab; font-size:10px; color:#1D4ED8;">
+            <strong>⠿ 箭頭批改 <span style="font-weight:400;">(按住可拖動)</span></strong>
+            <button type="button" class="mc-manage-phrase-btn" style="background:#FFF; border:1px solid #93C5FD; border-radius:4px; padding:1px 6px; font-size:10px; font-weight:700; color:#1D4ED8; cursor:pointer;">短語庫</button>
+          </div>
+
+          <div class="mc-arrow-status-row" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:4px;">
+            ${ARROW_STATUS_BUTTONS.map(sb => `
+              <button type="button" class="mc-st-pill" data-stkey="${sb.key}"
+                      style="background:${sb.bg}; color:${sb.fg}; border:1.5px solid ${sb.border}; border-radius:5px; padding:4px 2px; font-size:11px; font-weight:800; cursor:pointer; text-align:center; white-space:nowrap;">
+                ${sb.label}
+              </button>
+            `).join("")}
+          </div>
+
+          <input type="text" class="mc-arrow-input" placeholder="輸入批改字句或點下方雲端短語..."
+                 style="width:100%; box-sizing:border-box; padding:5px 7px; border:1px solid #93C5FD; border-radius:5px; font-size:12px;" />
+
+          <div style="display:flex; gap:4px; overflow-x:auto;" class="mc-phrase-cats"></div>
+          <!-- 拉高短語列表至 225px -->
+          <div style="max-height:225px; overflow-y:auto; display:flex; flex-direction:column; gap:3px; background:#F8FAFC; padding:5px; border-radius:5px; border:1px solid #E2E8F0;" class="mc-phrase-items"></div>
+
+          <div style="display:flex; justify-content:flex-end; gap:5px;">
+            <button type="button" class="mc-arrow-cancel" style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; border-radius:4px; padding:3px 9px; font-size:11px; cursor:pointer;">取消</button>
+            <button type="button" class="mc-arrow-ok" style="background:#2563EB; color:#FFF; border:none; border-radius:4px; padding:3px 12px; font-size:11px; font-weight:800; cursor:pointer;">貼上批改</button>
+          </div>
+        </div>
+
+        ${this.navOpts.hasPrev ? `<button class="mc-nav-prev" style="position:absolute; left:10px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.92); border:1px solid #CBD5E1; border-radius:999px; width:34px; height:34px; font-size:16px; font-weight:800; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.12); z-index:18;">‹</button>` : ""}
+        ${this.navOpts.hasNext ? `<button class="mc-nav-next" style="position:absolute; right:10px; top:50%; transform:translateY(-50%); background:rgba(255,255,255,0.92); border:1px solid #CBD5E1; border-radius:999px; width:34px; height:34px; font-size:16px; font-weight:800; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.12); z-index:18;">›</button>` : ""}
       </div>
     `;
 
-    overlay.querySelector("#qrm-close").onclick = () => overlay.remove();
-    overlay.querySelector("#qrm-cancel").onclick = () => overlay.remove();
-    overlay.querySelector("#qrm-manage-sp").onclick = () => {
-      overlay.remove();
-      openCloudDictModal("SPACE", () => openQuickReassignModal(page, projectSpaces, onUpdated));
-    };
-    overlay.querySelectorAll(".qrm-cat-btn").forEach(b => {
-      b.onclick = () => { selectedCat = b.dataset.qcat; renderBox(); };
+    this.rootEl = this.container.querySelector(".mc-root");
+    this.canvas = this.container.querySelector(".mc-canvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.nearToolbar = this.container.querySelector(".mc-near-toolbar");
+    this.rulerBox = this.container.querySelector(".mc-ruler-box");
+    this.rulerInput = this.container.querySelector(".mc-ruler-input");
+    this.plainTextBox = this.container.querySelector(".mc-plain-text-box");
+    this.plainInput = this.container.querySelector(".mc-plain-input");
+    this.arrowBox = this.container.querySelector(".mc-arrow-box");
+    this.arrowInput = this.container.querySelector(".mc-arrow-input");
+
+    this.makeFloatingBoxDraggable(this.rulerBox, this.rulerBox.querySelector(".mc-ruler-drag-handle"));
+    this.makeFloatingBoxDraggable(this.arrowBox, this.arrowBox.querySelector(".mc-arrow-drag-handle"));
+
+    const styleTag = document.createElement("style");
+    styleTag.textContent = `
+      .mc-tool-btn { background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap; }
+      .mc-tool-btn.active { background:#EFF6FF; border-color:#3B82F6; color:#1D4ED8; }
+      .mc-st-pill.active { outline: 2px solid #0F172A; }
+    `;
+    this.rootEl.appendChild(styleTag);
+
+    this.resizeCanvas();
+  }
+
+  resizeCanvas() {
+    if (!this.canvas || !this.rootEl) return;
+    const rect = this.rootEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = Math.max(1, rect.width * dpr);
+    this.canvas.height = Math.max(1, rect.height * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.viewW = rect.width;
+    this.viewH = rect.height;
+    this.render();
+  }
+
+  fitImageToScreen() {
+    if (!this.bgImg || !this.bgImg.naturalWidth || !this.viewW || !this.viewH) return;
+    const iw = this.bgImg.naturalWidth;
+    const ih = this.bgImg.naturalHeight;
+    const padTop = 44;
+    const availH = Math.max(100, this.viewH - padTop);
+    const s = Math.min(this.viewW / iw, availH / ih);
+    this.scale = s;
+    this.fitScale = s;
+    this.offsetX = (this.viewW - iw * s) / 2;
+    this.offsetY = padTop + (availH - ih * s) / 2;
+  }
+
+  screenToImg(sx, sy) {
+    return { x: (sx - this.offsetX) / this.scale, y: (sy - this.offsetY) / this.scale };
+  }
+
+  imgToScreen(ix, iy) {
+    return { x: ix * this.scale + this.offsetX, y: iy * this.scale + this.offsetY };
+  }
+
+  toggleWhiteBackground() {
+    this.whiteBg = !this.whiteBg;
+    this.render();
+    return this.whiteBg;
+  }
+
+  bindEvents() {
+    this._onResize = () => this.resizeCanvas();
+    window.addEventListener("resize", this._onResize);
+
+    this.rootEl.querySelectorAll(".mc-tool-btn").forEach(btn => {
+      btn.onclick = () => this.setMode(btn.dataset.mode);
     });
-    overlay.querySelectorAll(".qrm-sp-btn").forEach(b => {
-      b.onclick = () => { selectedSpace = b.dataset.qsp; renderBox(); };
-    });
-    overlay.querySelector("#qrm-save").onclick = async () => {
-      page.docTypeLabel = selectedCat;
-      page.space = selectedSpace;
-      page.title = `${selectedSpace} · ${selectedCat}`;
-      overlay.remove();
-      await saveCurrentProject();
-      if (typeof onUpdated === "function") onUpdated();
+
+    this.rootEl.querySelector(".mc-undo-btn").onclick = () => this.undo();
+
+    const overlayInput = this.rootEl.querySelector(".mc-overlay-file-input");
+    this.rootEl.querySelector(".mc-overlay-pick-btn").onclick = () => overlayInput.click();
+    overlayInput.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const rawImg = new Image();
+        rawImg.onload = () => {
+          const maxSide = 900;
+          const sc = Math.min(1, maxSide / Math.max(rawImg.width, rawImg.height));
+          const c = document.createElement("canvas");
+          c.width = Math.round(rawImg.width * sc);
+          c.height = Math.round(rawImg.height * sc);
+          c.getContext("2d").drawImage(rawImg, 0, 0, c.width, c.height);
+          this.addPhotoOverlay(c.toDataURL("image/jpeg", 0.82));
+        };
+        rawImg.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+      overlayInput.value = "";
     };
-  };
 
-  document.body.appendChild(overlay);
-  renderBox();
-}
+    const prevBtn = this.rootEl.querySelector(".mc-nav-prev");
+    if (prevBtn && this.navOpts.onPrev) prevBtn.onclick = () => this.navOpts.onPrev();
+    const nextBtn = this.rootEl.querySelector(".mc-nav-next");
+    if (nextBtn && this.navOpts.onNext) nextBtn.onclick = () => this.navOpts.onNext();
 
-window.history.pushState({ measuringGuard: true }, "");
-window.addEventListener("popstate", () => {
-  window.history.pushState({ measuringGuard: true }, "");
-  if (compareSpaceName) { compareSpaceName = null; renderWorkspace(); }
-  else if (currentProject && activePageIdx >= 0) {
-    if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
-    saveCurrentProject().finally(() => { activePageIdx = -1; renderWorkspace(); });
-  } else if (currentProject) {
-    if (confirm("確定要離開目前工程返回工程目錄嗎？")) { currentProject = null; renderProjectList(); }
-  }
-});
+    const adjustSelectedSize = (delta) => {
+      if (!this.selectedItems.length) return;
+      this.pushUndoSnapshot();
+      this.selectedItems.forEach(it => {
+        const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+        if (!obj) return;
+        if (it.type === "overlay") {
+          const factor = delta > 0 ? 1.15 : 0.87;
+          obj.w = Math.max(40, obj.w * factor);
+          obj.h = Math.max(40, obj.h * factor);
+        } else if (it.type === "marker" || it.type === "sticker" || it.type === "arrow" || it.type === "line") {
+          const cur = obj.fontSize || (it.type === "line" ? 15 : 18);
+          const step = Math.max(2, Math.round(cur * 0.14));
+          obj.fontSize = Math.min(120, Math.max(10, cur + (delta > 0 ? step : -step)));
+        } else {
+          obj.strokeWidth = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
+        }
+      });
+      this.updateNearToolbar();
+      this.emitSave();
+      this.render();
+    };
 
-checkBrowserCompatibility();
+    this.nearToolbar.querySelector(".mc-near-dec").onclick = () => adjustSelectedSize(-2);
+    this.nearToolbar.querySelector(".mc-near-inc").onclick = () => adjustSelectedSize(2);
 
-watchAuth(async () => {
-  applyBrandTitle();
-  masterDict = await loadMasterDict();
-  await loadCloudDictionaryFromDB();
-  renderProjectList();
-}, () => {
-  applyBrandTitle();
-  renderLoginView(root);
-});
+    this.nearToolbar.querySelector(".mc-near-merge").onclick = async () => {
+      if (!this.selectedItems.length) return;
+      await this.flattenSelectedItemsIntoBase();
+    };
 
-async function fetchAllCloudProjectsSplit(forceRefresh = false) {
-  if (!forceRefresh && Array.isArray(cachedCloudActiveList) && Array.isArray(cachedCloudArchivedList)) {
-    return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
-  }
-  const snap = await getDocs(collection(db, PROJ_COL));
-  const rawActive = [];
-  const rawArchived = [];
-  snap.forEach(d => {
-    const item = { id: d.id, ...d.data() };
-    if (item.archived === true) rawArchived.push(item);
-    else rawActive.push(item);
-  });
-  cachedCloudActiveList = dedupProjects(rawActive);
-  cachedCloudArchivedList = dedupProjects(rawArchived);
-  return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
-}
-
-async function fetchActiveCloudProjects(forceRefresh = false) {
-  const { active } = await fetchAllCloudProjectsSplit(forceRefresh);
-  return active;
-}
-
-async function fetchArchivedCloudProjects(forceRefresh = false) {
-  const { archived } = await fetchAllCloudProjectsSplit(forceRefresh);
-  return archived;
-}
-
-async function renderProjectList(options = {}) {
-  applyBrandTitle();
-  const { openSummon = false, forceFetchCloud = false } = options;
-  let localList = getLocalProjects().filter(p => p.archived !== true);
-  const hiddenSet = getHiddenIds();
-
-  if (localList.length === 0 && !localStorage.getItem(LOCAL_ACTIVE_KEY)) {
-    root.innerHTML = `<div class="card">首次初始化進行中工程清單...</div>`;
-    const activeFromCloud = await fetchActiveCloudProjects(false);
-    localList = activeFromCloud.filter(p => !hiddenSet.has(p.id));
-    saveLocalProjects(localList);
-  }
-
-  const visibleProjects = localList
-    .filter(p => !hiddenSet.has(p.id) && p.archived !== true)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-
-  root.innerHTML = `
-    <div class="card" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
-      <input type="text" id="new-proj-name" placeholder="輸入新工程名稱"
-             style="flex:1; min-width:170px; padding:6px 8px; border:1px solid #111827; border-radius:4px; font-size:14px;" />
-      <button id="btn-create-proj" class="btn-solid">+ 建立工程</button>
-      <button id="btn-summon-proj" class="btn-outline" style="color:#1D4ED8; border-color:#93C5FD; font-weight:800; background:#EFF6FF;">📣 召喚工程</button>
-      <button id="btn-home-cloud-dict" class="btn-outline" style="color:#0F172A;">⚙️ 雲端詞庫</button>
-      <button id="btn-db-cleaner" class="btn-outline" style="color:#475569;">🧹 資料庫清理</button>
-    </div>
-
-    <div id="summon-cloud-box" class="card ${openSummon ? "" : "hidden"}" style="background:#EFF6FF; border:1.5px solid #3B82F6;">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
-        <strong style="font-size:13px; color:#1E3A8A;">📣 召喚工程（雲端未完工清單）</strong>
-        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-          <label style="font-size:11px; color:#334155; display:flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="checkbox" id="chk-show-archived-summon" ${showArchivedInSummon ? "checked" : ""} />
-            查看已完工封存
-          </label>
-          <button id="btn-refresh-summon" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">🔄 刷新雲端</button>
-          <button id="btn-close-summon-box" class="btn-outline btn-sm">關閉</button>
-        </div>
-      </div>
-      <div style="margin-bottom:8px;">
-        <input type="text" id="summon-filter-input" value="${summonSearchText}" placeholder="🔍 輸入屋苑或關鍵字篩選..."
-               style="width:100%; box-sizing:border-box; padding:6px 9px; border:1px solid #93C5FD; border-radius:6px; font-size:13px; background:#FFF;" />
-      </div>
-      <div id="summon-list-body" style="display:flex; flex-direction:column; gap:5px; max-height:340px; overflow-y:auto;"></div>
-    </div>
-
-    <div id="db-cleaner-box" class="card hidden" style="background:#F8FAFC; border:1.5px solid #475569;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <strong style="font-size:13px; color:#0F172A;">🧹 後台資料庫清潔</strong>
-        <button id="btn-close-cleaner" class="btn-outline btn-sm">關閉</button>
-      </div>
-      <div id="cleaner-body" style="font-size:12px; color:#334155;">正在掃描雲端資料庫...</div>
-    </div>
-
-    <div id="proj-cards">
-      ${visibleProjects.map(p => {
-        const displayTitle = cleanProjectTitle(p.name);
-        const contacts = Array.isArray(p.contacts) ? p.contacts : [];
-        let fixCnt = 0;
-        let checkCnt = 0;
-        (p.pages || []).forEach(pg => {
-          (pg.reviewLogs || []).forEach(r => {
-            const st = normalizeReviewStatus(r.status);
-            if (st === "NEED_FIX") fixCnt++;
-            else if (st === "SITE_CHECK" || st === "NEED_INFO") checkCnt++;
-          });
+    this.nearToolbar.querySelectorAll(".mc-near-color").forEach(btn => {
+      btn.onclick = () => {
+        if (!this.selectedItems.length) return;
+        this.pushUndoSnapshot();
+        const col = btn.dataset.ncol;
+        this.selectedItems.forEach(it => {
+          const obj = this.getObjectByTypeAndIndex(it.type, it.index);
+          if (!obj || it.type === "overlay") return;
+          if (it.type === "sticker") {
+            obj.bg = col === "#FFFFFF" ? "#0F172A" : col;
+            obj.color = "#FFFFFF";
+          } else {
+            obj.color = col;
+          }
         });
-        const mapUrl = `https://www.google.com/maps/search/?api=1&query=${parseMapQueryFromTitle(displayTitle)}`;
-        const isContactOpen = openContactProjId === p.id;
+        this.emitSave();
+        this.render();
+      };
+    });
 
-        return `
-          <div class="card" style="display:flex; flex-direction:column; gap:8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
-              <div style="flex:1; min-width:200px;">
-                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                  <strong style="font-size:15px; cursor:pointer;" data-id="${p.id}">${displayTitle}</strong>
-                  <button class="btn-contact-toggle" data-contact-pid="${p.id}" title="隨手臨時聯絡記錄"
-                          style="background:${contacts.length > 0 ? "#FEF3C7" : "#F1F5F9"}; color:${contacts.length > 0 ? "#92400E" : "#475569"}; border:1px solid ${contacts.length > 0 ? "#F59E0B" : "#CBD5E1"}; border-radius:999px; padding:1px 7px; font-size:12px; font-weight:700; cursor:pointer;">
-                    👤${contacts.length > 0 ? ` ${contacts.length}` : ""}
-                  </button>
-                  <button class="btn-rename-proj" data-rename-pid="${p.id}" title="修改工程名稱"
-                          style="background:none; border:1px solid #E2E8F0; border-radius:5px; padding:1px 5px; font-size:11px; color:#64748B; cursor:pointer;">✏️</button>
-                  ${fixCnt > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#991B1B; font-weight:700; padding:1px 6px; border-radius:4px;">❌ ${fixCnt}需改</span>` : ""}
-                  ${checkCnt > 0 ? `<span style="font-size:11px; background:#FEF3C7; color:#92400E; font-weight:700; padding:1px 6px; border-radius:4px;">⚠️ ${checkCnt}待核/補</span>` : ""}
-                </div>
-                <div style="font-size:12px; color:#6B7280; margin-top:2px; cursor:pointer;" data-id="${p.id}">
-                  共 ${(p.pages || []).length} 頁圖紙 · 更新於 ${formatUpdatedTime(p.updatedAt)}
-                </div>
-              </div>
-
-              <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
-                <a href="${mapUrl}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm"
-                   style="text-decoration:none; color:#0284C7; border-color:#BAE6FD; font-weight:700;">🗺️ Map</a>
-                <button class="btn-outline btn-sm" style="color:#059669; border-color:#A7F3D0; font-weight:700;" data-archive-id="${p.id}">✅ 完工封存</button>
-                <button class="btn-outline btn-sm" style="color:#64748B; border-color:#CBD5E1;" data-hide-id="${p.id}">📦 移除</button>
-                <button class="btn-solid btn-sm" data-id="${p.id}">進入空間圖集 →</button>
-              </div>
-            </div>
-            ${isContactOpen ? renderContactDrawerHtml(p) : ""}
-          </div>
-        `;
-      }).join("") || `
-        <div class="card" style="color:#475569; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-          <span>目前首頁沒有進行中的工程（零數據待機中）。</span>
-          <button id="btn-empty-summon" class="btn-solid btn-sm">📣 立即召喚工程</button>
-        </div>
-      `}
-    </div>
-  `;
-
-  document.getElementById("btn-home-cloud-dict").onclick = () => openCloudDictModal("SPACE");
-  const emptySummonBtn = document.getElementById("btn-empty-summon");
-  if (emptySummonBtn) emptySummonBtn.onclick = () => { document.getElementById("summon-cloud-box").classList.remove("hidden"); populateSummonList(false); };
-
-  document.getElementById("btn-create-proj").onclick = async () => {
-    const name = cleanProjectTitle(document.getElementById("new-proj-name").value.trim());
-    if (!name) return;
-    const id = "P_" + Date.now();
-    const newProj = { id, name, pages: [], contacts: [], archived: false, updatedAt: Date.now() };
-    await setDoc(doc(db, PROJ_COL, id), newProj);
-    upsertLocalProject(newProj);
-    if (Array.isArray(cachedCloudActiveList)) cachedCloudActiveList.unshift(newProj);
-    openProject(newProj);
-  };
-
-  document.getElementById("btn-summon-proj").onclick = () => {
-    const box = document.getElementById("summon-cloud-box");
-    const willOpen = box.classList.contains("hidden");
-    box.classList.toggle("hidden");
-    if (willOpen) populateSummonList(false);
-  };
-  document.getElementById("btn-refresh-summon").onclick = () => populateSummonList(true);
-  document.getElementById("btn-close-summon-box").onclick = () => document.getElementById("summon-cloud-box").classList.add("hidden");
-  document.getElementById("chk-show-archived-summon").onchange = (e) => { showArchivedInSummon = e.target.checked; populateSummonList(false); };
-  document.getElementById("summon-filter-input").oninput = (e) => { summonSearchText = e.target.value; populateSummonList(false); };
-  if (openSummon) populateSummonList(forceFetchCloud);
-
-  document.getElementById("btn-db-cleaner").onclick = () => openDatabaseCleaner();
-  document.getElementById("btn-close-cleaner").onclick = () => document.getElementById("db-cleaner-box").classList.add("hidden");
-
-  root.querySelectorAll(".btn-contact-toggle").forEach(btn => {
-    btn.onclick = (e) => { e.stopPropagation(); const pid = btn.dataset.contactPid; openContactProjId = openContactProjId === pid ? null : pid; renderProjectList(); };
-  });
-  bindContactEvents(visibleProjects, () => renderProjectList());
-
-  root.querySelectorAll(".btn-rename-proj").forEach(btn => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      const target = visibleProjects.find(p => p.id === btn.dataset.renamePid);
-      if (!target) return;
-      const nextName = prompt("修改工程名稱：", cleanProjectTitle(target.name));
-      if (nextName === null) return;
-      const trimmed = cleanProjectTitle(nextName);
-      if (!trimmed || trimmed === target.name) return;
-      await renameProjectEverywhere(target, trimmed);
-      renderProjectList();
+    this.nearToolbar.querySelector(".mc-near-edit").onclick = () => {
+      if (this.selectedItems.length !== 1) return;
+      const single = this.selectedItems[0];
+      const obj = this.getObjectByTypeAndIndex(single.type, single.index);
+      if (!obj) return;
+      const anchor = this.getObjectAnchorImg(single.type, obj);
+      const scr = this.imgToScreen(anchor.x, anchor.y);
+      if (single.type === "arrow") {
+        this.openArrowEditor(scr.x, scr.y, obj.text || "", obj.status || "NEED_FIX", (newTxt, newStatus) => {
+          this.pushUndoSnapshot();
+          obj.text = newTxt;
+          obj.status = newStatus;
+          this.emitSave(newTxt.trim() ? `[${this.formatStatusLabel(newStatus)}] ${newTxt.trim()}` : "", newStatus);
+          this.updateNearToolbar();
+          this.render();
+        });
+      } else if (single.type === "line") {
+        this.openRulerEditor(scr.x, scr.y, obj.text || "", (newTxt) => {
+          this.pushUndoSnapshot();
+          obj.text = newTxt;
+          this.emitSave();
+          this.updateNearToolbar();
+          this.render();
+        });
+      } else {
+        this.openPlainTextEditor(scr.x, scr.y, obj.text || obj.label || "", (newTxt) => {
+          this.pushUndoSnapshot();
+          if (single.type === "sticker") obj.label = newTxt;
+          else obj.text = newTxt;
+          this.emitSave();
+          this.updateNearToolbar();
+          this.render();
+        });
+      }
     };
-  });
 
-  root.querySelectorAll("[data-archive-id]").forEach(btn => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      const target = visibleProjects.find(p => p.id === btn.dataset.archiveId);
-      if (!target) return;
-      const cleanTitle = cleanProjectTitle(target.name);
-      if (!confirm(`確定將「${cleanTitle}」標記為完工封存嗎？`)) return;
-      target.name = cleanTitle; target.archived = true; target.archivedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      removeLocalProjectById(target.id);
-      if (Array.isArray(cachedCloudActiveList)) cachedCloudActiveList = cachedCloudActiveList.filter(x => x.id !== target.id);
-      if (Array.isArray(cachedCloudArchivedList)) cachedCloudArchivedList.unshift(target);
-      renderProjectList();
+    this.nearToolbar.querySelector(".mc-near-del").onclick = () => {
+      if (!this.selectedItems.length) return;
+      this.pushUndoSnapshot();
+      const sortedDesc = [...this.selectedItems].sort((a, b) => b.index - a.index);
+      sortedDesc.forEach(it => this.deleteObjectAt(it.type, it.index));
+      this.selectedItems = [];
+      this.updateNearToolbar();
+      this.emitSave();
+      this.render();
     };
-  });
 
-  root.querySelectorAll("[data-hide-id]").forEach(btn => {
-    btn.onclick = (e) => { e.stopPropagation(); const pid = btn.dataset.hideId; const s = getHiddenIds(); s.add(pid); saveHiddenIds(s); removeLocalProjectById(pid); renderProjectList(); };
-  });
+    // 追蹤目前聚焦的是主輸入框還是分格輸入框（完全不觸發系統鍵盤）
+    this.activeRulerTargetInput = this.rulerInput;
+    this.rulerInput.addEventListener("focus", () => { this.activeRulerTargetInput = this.rulerInput; });
+    this.rulerBox.addEventListener("focusin", (e) => {
+      if (e.target && (e.target.classList.contains("mc-ruler-input") || e.target.classList.contains("mc-rsplit-field"))) {
+        this.activeRulerTargetInput = e.target;
+      }
+    });
 
-  root.querySelectorAll("[data-id]").forEach(el => {
-    el.onclick = async () => { const found = visibleProjects.find(p => p.id === el.dataset.id); if (found) await openProjectLightweight(found); };
-  });
-}
+    this.rulerBox.querySelectorAll(".mc-rnum-btn").forEach(btn => {
+      btn.onmousedown = (e) => e.preventDefault();
+      btn.onclick = () => {
+        const key = btn.dataset.rnum;
+        const target = (this.activeRulerTargetInput && document.body.contains(this.activeRulerTargetInput))
+          ? this.activeRulerTargetInput
+          : this.rulerInput;
+        if (key === "清空") {
+          target.value = "";
+        } else if (key === "⌫") {
+          target.value = target.value.slice(0, -1);
+        } else {
+          target.value = `${target.value}${key}`;
+        }
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+    });
 
-function renderContactDrawerHtml(proj) {
-  const contacts = Array.isArray(proj.contacts) ? proj.contacts : [];
-  const rolePresets = ["in charge", "設計師", "業主", "判頭", "現場負責", "管理處"];
-  return `
-    <div style="background:#FFFBEB; border:1px solid #FCD34D; border-radius:6px; padding:7px 9px; display:flex; flex-direction:column; gap:6px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <strong style="font-size:12px; color:#92400E;">👤 隨手臨時聯絡記錄</strong>
-        <button class="btn-contact-close btn-outline btn-sm" style="padding:1px 6px; font-size:11px;">收起</button>
-      </div>
-      <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center;">
-        <input type="text" id="ct-name-${proj.id}" placeholder="人名 / 事項"
-               style="flex:1.2; min-width:110px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
-        <input type="text" id="ct-role-${proj.id}" placeholder="崗位 / 備註（如：in charge）"
-               style="flex:1.2; min-width:120px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
-        <input type="tel" id="ct-phone-${proj.id}" placeholder="電話（選填）"
-               style="flex:1; min-width:100px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
-        <button class="btn-solid btn-sm btn-ct-add" data-pid="${proj.id}" style="background:#D97706; border-color:#D97706;">+ 記低</button>
-      </div>
-      <div style="display:flex; flex-wrap:wrap; gap:4px;">
-        ${rolePresets.map(r => `
-          <button type="button" class="btn-ct-role-preset" data-pid="${proj.id}" data-rval="${r}"
-                  style="background:#FEF3C7; color:#92400E; border:1px solid #F59E0B; border-radius:999px; padding:1px 7px; font-size:10px; font-weight:700; cursor:pointer;">
-            + ${r}
-          </button>
-        `).join("")}
-      </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        ${contacts.map((c, idx) => {
-          const waUrl = formatWhatsAppUrl(c.phone);
-          const roleText = c.role || c.note || "";
-          return `
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; background:#FFF; border:1px solid #FDE68A; border-radius:5px; padding:4px 8px; flex-wrap:wrap;">
-              <div style="font-size:12px; color:#1E293B; display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
-                <strong>${c.name || "臨時記錄"}</strong>
-                ${roleText ? `<span style="background:#FEF3C7; color:#92400E; border:1px solid #FCD34D; border-radius:4px; padding:0 5px; font-size:11px; font-weight:700;">${roleText}</span>` : ""}
-                ${c.phone ? `<span style="color:#0284C7; font-weight:600;">${c.phone}</span>` : ""}
-              </div>
-              <div style="display:flex; gap:5px; align-items:center;">
-                ${c.phone ? `<a href="tel:${c.phone}" class="btn-outline btn-sm" style="text-decoration:none; padding:1px 6px; font-size:11px; color:#059669; border-color:#6EE7B7;">📞 撥打</a>` : ""}
-                ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm" style="text-decoration:none; padding:1px 6px; font-size:11px; color:#16A34A; border-color:#86EFAC;">💬 WhatsApp</a>` : ""}
-                <button class="btn-ct-edit" data-pid="${proj.id}" data-cidx="${idx}" title="編輯崗位或電話" style="background:none; border:none; color:#475569; font-size:11px; cursor:pointer; padding:0 3px;">✏️</button>
-                <button class="btn-ct-del" data-pid="${proj.id}" data-cidx="${idx}" style="background:none; border:none; color:#94A3B8; font-size:12px; cursor:pointer; padding:0 4px;">✕</button>
-              </div>
-            </div>
-          `;
-        }).join("") || `<div style="font-size:11px; color:#92400E;">尚無臨時記錄。</div>`}
-      </div>
-    </div>
-  `;
-}
-
-function bindContactEvents(projectListRef, onRefresh) {
-  root.querySelectorAll(".btn-contact-close").forEach(btn => { btn.onclick = () => { openContactProjId = null; onRefresh(); }; });
-  root.querySelectorAll(".btn-ct-role-preset").forEach(btn => {
-    btn.onclick = () => {
-      const inp = document.getElementById(`ct-role-${btn.dataset.pid}`);
-      if (inp) { inp.value = btn.dataset.rval; inp.focus(); }
+    const appendRulerToken = (tok) => {
+      const cur = this.rulerInput.value.trim();
+      this.rulerInput.value = cur ? `${cur} ${tok}` : tok;
     };
-  });
-  root.querySelectorAll(".btn-ct-add").forEach(btn => {
-    btn.onclick = async () => {
-      const pid = btn.dataset.pid;
-      const target = projectListRef.find(p => p.id === pid);
-      if (!target) return;
-      const nameVal = (document.getElementById(`ct-name-${pid}`)?.value || "").trim();
-      const roleVal = (document.getElementById(`ct-role-${pid}`)?.value || "").trim();
-      const phoneVal = (document.getElementById(`ct-phone-${pid}`)?.value || "").trim();
-      if (!nameVal && !roleVal && !phoneVal) return;
-      if (!Array.isArray(target.contacts)) target.contacts = [];
-      target.contacts.push({ name: nameVal || "聯絡記錄", role: roleVal, phone: phoneVal });
-      target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
-      onRefresh();
+    this.rulerBox.querySelectorAll(".mc-rword-btn").forEach(b => {
+      b.onclick = () => appendRulerToken(b.dataset.rword);
+    });
+    this.rulerBox.querySelector(".mc-ruler-cancel").onclick = () => {
+      this.rulerBox.classList.add("hidden");
+      this.pendingRulerAction = null;
+      this.updateNearToolbar();
     };
-  });
-  root.querySelectorAll(".btn-ct-edit").forEach(btn => {
-    btn.onclick = async () => {
-      const pid = btn.dataset.pid;
-      const target = projectListRef.find(p => p.id === pid);
-      const item = target?.contacts?.[Number(btn.dataset.cidx)];
-      if (!item) return;
-      const nextName = prompt("修改人名 / 事項：", item.name || "");
-      if (nextName === null) return;
-      const nextRole = prompt("修改崗位 / 備註（如：in charge）：", item.role || item.note || "");
-      if (nextRole === null) return;
-      const nextPhone = prompt("修改電話：", item.phone || "");
-      if (nextPhone === null) return;
-      item.name = nextName.trim() || item.name;
-      item.role = nextRole.trim();
-      item.phone = nextPhone.trim();
-      target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
-      onRefresh();
+    this.rulerBox.querySelector(".mc-ruler-cancel-btn").onclick = () => {
+      this.rulerBox.classList.add("hidden");
+      this.pendingRulerAction = null;
+      this.updateNearToolbar();
     };
-  });
-  root.querySelectorAll(".btn-ct-del").forEach(btn => {
-    btn.onclick = async () => {
-      const pid = btn.dataset.pid;
-      const target = projectListRef.find(p => p.id === pid);
-      if (!target || !Array.isArray(target.contacts)) return;
-      target.contacts.splice(Number(btn.dataset.cidx), 1);
-      target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
-      onRefresh();
+    this.rulerBox.querySelector(".mc-ruler-ok").onclick = () => this.commitRulerEditor(true);
+    this.rulerInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); this.commitRulerEditor(true); }
+    });
+    this.rulerBox.querySelector(".mc-ruler-dict-btn").onclick = () => {
+      if (typeof this.navOpts.onOpenDictManager === "function") {
+        this.navOpts.onOpenDictManager("STAMP", () => this.renderRulerItemsUI());
+      }
     };
-  });
-}
 
-async function renameProjectEverywhere(proj, newCleanName) {
-  proj.name = newCleanName;
-  proj.updatedAt = Date.now();
-  const slimPages = (proj.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-  await setDoc(doc(db, PROJ_COL, proj.id), { ...proj, pages: slimPages });
-  upsertLocalProject(proj);
-  if (Array.isArray(cachedCloudActiveList)) {
-    const found = cachedCloudActiveList.find(x => x.id === proj.id);
-    if (found) found.name = newCleanName;
+    // 純文字小框事件
+    this.plainTextBox.querySelector(".mc-plain-cancel").onclick = () => {
+      this.plainTextBox.classList.add("hidden");
+      this.pendingPlainTextAction = null;
+      this.updateNearToolbar();
+    };
+    this.plainTextBox.querySelector(".mc-plain-ok").onclick = () => this.commitPlainText(true);
+    this.plainInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); this.commitPlainText(true); }
+    });
+
+    // 箭頭批改浮窗事件
+    this.arrowBox.querySelectorAll(".mc-st-pill").forEach(pill => {
+      pill.onclick = () => {
+        this.selectedArrowStatus = pill.dataset.stkey;
+        this.updateArrowStatusPills();
+        this.arrowInput.focus();
+      };
+    });
+    this.arrowBox.querySelector(".mc-arrow-cancel").onclick = () => {
+      this.arrowBox.classList.add("hidden");
+      this.pendingArrowAction = null;
+      this.updateNearToolbar();
+    };
+    this.arrowBox.querySelector(".mc-arrow-ok").onclick = () => this.commitArrowEditor(true);
+    this.arrowInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); this.commitArrowEditor(true); }
+    });
+    this.arrowBox.querySelector(".mc-manage-phrase-btn").onclick = () => {
+      if (typeof this.navOpts.onOpenDictManager === "function") {
+        this.navOpts.onOpenDictManager("PHRASE", () => this.renderArrowPhraseUI());
+      }
+    };
+
+    this.canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = this.canvas.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      this.zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
+    }, { passive: false });
+
+    this.canvas.addEventListener("pointerdown", (e) => this.handlePointerDown(e));
+    this.canvas.addEventListener("pointermove", (e) => this.handlePointerMove(e));
+    this.canvas.addEventListener("pointerup", (e) => this.handlePointerUp(e));
+    this.canvas.addEventListener("pointercancel", (e) => this.handlePointerUp(e));
+
+    this.canvas.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 2) {
+        this.isDrawing = false;
+        this.draftObj = null;
+        this.marqueeRect = null;
+        this.pinchDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    }, { passive: true });
+
+    this.canvas.addEventListener("touchmove", (e) => {
+      if (e.touches.length === 2 && this.pinchDist > 0) {
+        const newDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const rect = this.canvas.getBoundingClientRect();
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        this.zoomAt(cx, cy, newDist / this.pinchDist);
+        this.pinchDist = newDist;
+      }
+    }, { passive: true });
   }
-}
 
-async function populateSummonList(forceRefresh = false) {
-  const listBody = document.getElementById("summon-list-body");
-  if (!listBody) return;
-  listBody.innerHTML = `<div style="font-size:12px; color:#475569; padding:8px;">正在連線查詢雲端未完工工程...</div>`;
-  try {
-    const activeList = await fetchActiveCloudProjects(forceRefresh);
-    let combinedList = [...activeList];
-    if (showArchivedInSummon) {
-      const archList = await fetchArchivedCloudProjects(forceRefresh);
-      combinedList = [...activeList, ...archList];
+  zoomAt(sx, sy, factor) {
+    const newScale = Math.min(8, Math.max(0.2, this.scale * factor));
+    const ratio = newScale / this.scale;
+    this.offsetX = sx - (sx - this.offsetX) * ratio;
+    this.offsetY = sy - (sy - this.offsetY) * ratio;
+    this.scale = newScale;
+    this.updateNearToolbar();
+    this.render();
+  }
+
+  startDragSelectedGroup(startImgPt) {
+    const snapshots = this.selectedItems.map(it => ({
+      ...it,
+      orig: JSON.parse(JSON.stringify(this.getObjectByTypeAndIndex(it.type, it.index)))
+    }));
+    this.dragGroupState = { startImg: startImgPt, moved: false, snapshots };
+  }
+
+  handlePointerDown(e) {
+    if (e.pointerType === "touch" && !e.isPrimary) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const pt = this.screenToImg(sx, sy);
+
+    const now = Date.now();
+    if (now - this.lastTapTime < 320 && this.lastTapPos && Math.hypot(sx - this.lastTapPos.x, sy - this.lastTapPos.y) < 22) {
+      const hit = this.hitTest(pt.x, pt.y);
+      if (hit && (hit.type === "marker" || hit.type === "arrow" || hit.type === "line" || hit.type === "sticker")) {
+        this.setSingleSelection(hit);
+        const obj = this.getObjectByTypeAndIndex(hit.type, hit.index);
+        if (hit.type === "arrow") {
+          this.openArrowEditor(sx, sy, obj.text || "", obj.status || "NEED_FIX", (newTxt, newStatus) => {
+            this.pushUndoSnapshot();
+            obj.text = newTxt;
+            obj.status = newStatus;
+            this.emitSave(newTxt.trim() ? `[${this.formatStatusLabel(newStatus)}] ${newTxt.trim()}` : "", newStatus);
+            this.updateNearToolbar();
+            this.render();
+          });
+        } else if (hit.type === "line") {
+          this.openRulerEditor(sx, sy, obj.text || "", (newTxt) => {
+            this.pushUndoSnapshot();
+            obj.text = newTxt;
+            this.emitSave();
+            this.updateNearToolbar();
+            this.render();
+          });
+        } else {
+          this.openPlainTextEditor(sx, sy, obj.text || obj.label || "", (newTxt) => {
+            this.pushUndoSnapshot();
+            if (hit.type === "sticker") obj.label = newTxt;
+            else obj.text = newTxt;
+            this.emitSave();
+            this.updateNearToolbar();
+            this.render();
+          });
+        }
+        this.lastTapTime = 0;
+        return;
+      }
     }
-    const kw = summonSearchText.trim().toLowerCase();
-    const filtered = kw ? combinedList.filter(p => cleanProjectTitle(p.name).toLowerCase().includes(kw)) : combinedList;
-    const localIds = new Set(getLocalProjects().map(x => x.id));
-    const hiddenSet = getHiddenIds();
+    this.lastTapTime = now;
+    this.lastTapPos = { x: sx, y: sy };
 
-    if (!filtered.length) {
-      listBody.innerHTML = `<div style="font-size:12px; color:#64748B; padding:8px;">找不到符合條件的工程。</div>`;
+    if (this.mode === "VIEW") {
+      if (this.selectedItems.length) {
+        this.selectedItems = [];
+        this.updateNearToolbar();
+        this.render();
+      }
+      this.isPanning = true;
+      this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
       return;
     }
 
-    listBody.innerHTML = filtered.map(p => {
-      const displayTitle = cleanProjectTitle(p.name);
-      const isArchived = p.archived === true;
-      const isOnHome = localIds.has(p.id) && !hiddenSet.has(p.id) && !isArchived;
+    if (this.mode === "ERASER") {
+      const hit = this.hitTest(pt.x, pt.y);
+      if (hit) {
+        this.pushUndoSnapshot();
+        this.deleteObjectAt(hit.type, hit.index);
+        this.selectedItems = [];
+        this.updateNearToolbar();
+        this.emitSave();
+        this.render();
+      }
+      return;
+    }
+
+    if (this.mode === "SELECT") {
+      const hit = this.hitTest(pt.x, pt.y);
+      if (hit) {
+        if (this.multiSelectMode) {
+          this.toggleSelectionItem(hit);
+          if (this.selectedItems.length) this.startDragSelectedGroup(pt);
+        } else {
+          if (!this.isItemSelected(hit.type, hit.index)) this.setSingleSelection(hit);
+          this.startDragSelectedGroup(pt);
+        }
+        this.updateNearToolbar();
+        this.render();
+      } else {
+        if (this.multiSelectMode) {
+          this.marqueeRect = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
+        } else {
+          this.selectedItems = [];
+          this.updateNearToolbar();
+          this.isPanning = true;
+          this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
+        }
+        this.render();
+      }
+      return;
+    }
+
+    if (this.mode === "TEXT") {
+      const adaptiveFs = this.getAdaptiveFontSize(18);
+      this.openPlainTextEditor(sx, sy, "", (txt) => {
+        if (!txt.trim()) {
+          this.setMode("VIEW");
+          this.updateNearToolbar();
+          return;
+        }
+        this.pushUndoSnapshot();
+        this.markers.push({
+          x: pt.x, y: pt.y,
+          text: txt.trim(),
+          color: this.activeColor,
+          fontSize: adaptiveFs
+        });
+        this.setSingleSelection({ type: "marker", index: this.markers.length - 1 });
+        this.setMode("VIEW");
+        this.updateNearToolbar();
+        this.emitSave();
+        this.render();
+      });
+      return;
+    }
+
+    if (this.mode === "ARROW") {
+      this.isDrawing = true;
+      this.draftObj = {
+        type: "arrow",
+        x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+        color: this.activeColor,
+        strokeWidth: this.strokeWidth,
+        fontSize: this.getAdaptiveFontSize(16),
+        text: "",
+        status: "NEED_FIX"
+      };
+      return;
+    }
+
+    if (this.mode === "RULER") {
+      this.isDrawing = true;
+      this.draftObj = {
+        type: "line",
+        x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+        color: this.activeColor,
+        strokeWidth: this.strokeWidth,
+        fontSize: this.getAdaptiveFontSize(15),
+        text: ""
+      };
+      return;
+    }
+
+    if (this.mode === "PEN") {
+      this.isDrawing = true;
+      this.draftObj = {
+        type: "path",
+        points: [{ x: pt.x, y: pt.y }],
+        color: this.activeColor,
+        strokeWidth: this.strokeWidth
+      };
+    }
+  }
+
+  handlePointerMove(e) {
+    if (e.pointerType === "touch" && !e.isPrimary) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+
+    if (this.isPanning) {
+      this.offsetX = sx - this.panStart.x;
+      this.offsetY = sy - this.panStart.y;
+      this.updateNearToolbar();
+      this.render();
+      return;
+    }
+
+    const pt = this.screenToImg(sx, sy);
+
+    if (this.marqueeRect) {
+      this.marqueeRect.x2 = pt.x;
+      this.marqueeRect.y2 = pt.y;
+      this.render();
+      return;
+    }
+
+    if (this.dragGroupState) {
+      const dx = pt.x - this.dragGroupState.startImg.x;
+      const dy = pt.y - this.dragGroupState.startImg.y;
+      if (!this.dragGroupState.moved && Math.hypot(dx, dy) > 2 / this.scale) {
+        this.pushUndoSnapshot();
+        this.dragGroupState.moved = true;
+      }
+      this.dragGroupState.snapshots.forEach(snap => {
+        const obj = this.getObjectByTypeAndIndex(snap.type, snap.index);
+        const orig = snap.orig;
+        if (!obj || !orig) return;
+        if (snap.type === "marker" || snap.type === "sticker" || snap.type === "overlay") {
+          obj.x = orig.x + dx; obj.y = orig.y + dy;
+        } else if (snap.type === "line" || snap.type === "arrow") {
+          obj.x1 = orig.x1 + dx; obj.y1 = orig.y1 + dy;
+          obj.x2 = orig.x2 + dx; obj.y2 = orig.y2 + dy;
+        } else if (snap.type === "path" && Array.isArray(orig.points)) {
+          obj.points = orig.points.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        }
+      });
+      this.updateNearToolbar();
+      this.render();
+      return;
+    }
+
+    if (this.isDrawing && this.draftObj) {
+      if (this.draftObj.type === "arrow" || this.draftObj.type === "line") {
+        this.draftObj.x2 = pt.x; this.draftObj.y2 = pt.y;
+      } else if (this.draftObj.type === "path") {
+        this.draftObj.points.push({ x: pt.x, y: pt.y });
+      }
+      this.render();
+    }
+  }
+
+  handlePointerUp(e) {
+    if (this.isPanning) { this.isPanning = false; return; }
+
+    if (this.marqueeRect) {
+      const minX = Math.min(this.marqueeRect.x1, this.marqueeRect.x2);
+      const maxX = Math.max(this.marqueeRect.x1, this.marqueeRect.x2);
+      const minY = Math.min(this.marqueeRect.y1, this.marqueeRect.y2);
+      const maxY = Math.max(this.marqueeRect.y1, this.marqueeRect.y2);
+      this.marqueeRect = null;
+
+      if (maxX - minX > 6 / this.scale || maxY - minY > 6 / this.scale) {
+        const inBox = (ix, iy) => ix >= minX && ix <= maxX && iy >= minY && iy <= maxY;
+        const addIfNew = (type, index) => {
+          if (!this.isItemSelected(type, index)) this.selectedItems.push({ type, index });
+        };
+        this.markers.forEach((m, i) => { if (inBox(m.x, m.y)) addIfNew("marker", i); });
+        this.stickers.forEach((s, i) => { if (inBox(s.x, s.y)) addIfNew("sticker", i); });
+        this.lines.forEach((l, i) => { if (inBox(l.x1, l.y1) || inBox(l.x2, l.y2) || inBox((l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2)) addIfNew("line", i); });
+        this.arrows.forEach((a, i) => { if (inBox(a.x1, a.y1) || inBox(a.x2, a.y2)) addIfNew("arrow", i); });
+        this.paths.forEach((p, i) => { if ((p.points || []).some(pt => inBox(pt.x, pt.y))) addIfNew("path", i); });
+        this.overlays.forEach((ov, i) => { if (inBox(ov.x, ov.y)) addIfNew("overlay", i); });
+      }
+      this.updateNearToolbar();
+      this.render();
+      return;
+    }
+
+    if (this.dragGroupState) {
+      const didMove = this.dragGroupState.moved;
+      this.dragGroupState = null;
+      if (didMove) this.emitSave();
+      return;
+    }
+
+    if (!this.isDrawing || !this.draftObj) return;
+    this.isDrawing = false;
+    const finished = this.draftObj;
+    this.draftObj = null;
+
+    if (finished.type === "arrow") {
+      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10) {
+        this.render();
+        return;
+      }
+      this.pushUndoSnapshot();
+      this.arrows.push(finished);
+      this.setSingleSelection({ type: "arrow", index: this.arrows.length - 1 });
+      this.render();
+
+      const tailScr = this.imgToScreen(finished.x2, finished.y2);
+      this.openArrowEditor(tailScr.x, tailScr.y, "", "NEED_FIX", (txt, status) => {
+        const cleanTxt = txt.trim();
+        finished.text = cleanTxt || this.formatStatusLabel(status);
+        finished.status = status;
+        this.setMode("VIEW");
+        this.updateNearToolbar();
+        this.emitSave(cleanTxt ? `[${this.formatStatusLabel(status)}] ${cleanTxt}` : "", status);
+        this.render();
+      });
+      return;
+    }
+
+    if (finished.type === "line") {
+      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10) {
+        this.render();
+        return;
+      }
+      this.pushUndoSnapshot();
+      this.lines.push(finished);
+      this.setSingleSelection({ type: "line", index: this.lines.length - 1 });
+      this.render();
+
+      const midScr = this.imgToScreen((finished.x1 + finished.x2) / 2, (finished.y1 + finished.y2) / 2);
+      this.openRulerEditor(midScr.x, midScr.y, "", (txt) => {
+        finished.text = txt.trim();
+        this.updateNearToolbar();
+        this.emitSave();
+        this.render();
+      });
+      return;
+    }
+
+    if (finished.type === "path" && finished.points.length > 1) {
+      this.pushUndoSnapshot();
+      this.paths.push(finished);
+      this.setSingleSelection({ type: "path", index: this.paths.length - 1 });
+      this.updateNearToolbar();
+      this.emitSave();
+      this.render();
+    }
+  }
+
+  formatStatusLabel(st) {
+    if (st === "OK") return "確認";
+    if (st === "SITE_CHECK") return "再核對";
+    if (st === "NEED_INFO") return "待補資料";
+    return "需改";
+  }
+
+  hideAllEditors() {
+    this.plainTextBox.classList.add("hidden");
+    this.arrowBox.classList.add("hidden");
+    this.rulerBox.classList.add("hidden");
+  }
+
+  openRulerEditor(screenX, screenY, initialText, onConfirm) {
+    this.hideAllEditors();
+    this.nearToolbar.style.display = "none";
+    this.pendingRulerAction = onConfirm;
+    this.rulerInput.value = initialText || "";
+    this.activeRulerTargetInput = this.rulerInput;
+    this.rulerBox.querySelector(".mc-ruler-split-box")?.classList.add("hidden");
+    this.rulerBox.classList.remove("hidden");
+
+    const boxW = Math.min(410, this.viewW * 0.95);
+    const boxH = 420;
+    const left = Math.max(8, Math.min(this.viewW - boxW - 8, screenX - boxW / 2));
+    const top = screenY + 24 + boxH > this.viewH ? Math.max(48, this.viewH - boxH - 12) : Math.max(48, screenY + 16);
+    this.rulerBox.style.left = `${left}px`;
+    this.rulerBox.style.top = `${top}px`;
+    this.renderRulerItemsUI();
+  }
+
+  openRulerMultiDimSplit(baseName, dimsStr) {
+    const splitBox = this.rulerBox.querySelector(".mc-ruler-split-box");
+    const titleEl = this.rulerBox.querySelector(".mc-rsplit-title");
+    const inputsEl = this.rulerBox.querySelector(".mc-rsplit-inputs");
+    const closeBtn = this.rulerBox.querySelector(".mc-rsplit-close");
+    if (!splitBox || !inputsEl) return;
+
+    const labels = dimsStr.split("");
+    titleEl.textContent = `${baseName}（分別填寫 ${labels.join(" × ")}）`;
+    splitBox.classList.remove("hidden");
+
+    closeBtn.onclick = () => {
+      splitBox.classList.add("hidden");
+      this.activeRulerTargetInput = this.rulerInput;
+    };
+
+    inputsEl.innerHTML = labels.map((lbl, idx) => `
+      ${idx > 0 ? `<span style="color:#64748B; font-weight:800;">×</span>` : ""}
+      <input type="text" inputmode="none" class="mc-rsplit-field" data-dim="${lbl}" placeholder="${lbl}"
+             style="flex:1; min-width:0; padding:5px 6px; border:1.5px solid #2563EB; border-radius:5px; font-size:13px; font-weight:800; text-align:center; background:#FFF;" />
+    `).join("") + `
+      <button type="button" class="mc-rsplit-apply"
+              style="background:#2563EB; color:#FFF; border:none; border-radius:5px; padding:5px 9px; font-size:11px; font-weight:800; cursor:pointer; white-space:nowrap;">
+        填入
+      </button>
+    `;
+
+    const fieldEls = Array.from(inputsEl.querySelectorAll(".mc-rsplit-field"));
+    const syncToMainInput = () => {
+      const vals = fieldEls.map(f => f.value.trim()).filter(Boolean);
+      this.rulerInput.value = vals.length ? `${baseName} ${vals.join("×")}` : baseName;
+    };
+
+    fieldEls.forEach((inp, idx) => {
+      inp.addEventListener("input", syncToMainInput);
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (idx < fieldEls.length - 1) {
+            fieldEls[idx + 1].focus();
+          } else {
+            syncToMainInput();
+            this.commitRulerEditor(true);
+          }
+        }
+      });
+    });
+
+    inputsEl.querySelector(".mc-rsplit-apply").onclick = () => {
+      syncToMainInput();
+      splitBox.classList.add("hidden");
+      this.activeRulerTargetInput = this.rulerInput;
+    };
+
+    if (fieldEls[0]) {
+      this.activeRulerTargetInput = fieldEls[0];
+      fieldEls[0].focus();
+    }
+  }
+
+  renderRulerItemsUI() {
+    const catsEl = this.rulerBox.querySelector(".mc-ruler-cats");
+    const itemsEl = this.rulerBox.querySelector(".mc-ruler-items");
+    const stampGroups = this.getStampGroups();
+
+    const allTabs = [
+      { key: "高", label: "高", items: RULER_CATEGORY_ITEMS["高"] },
+      { key: "留位", label: "留位", items: RULER_CATEGORY_ITEMS["留位"] },
+      { key: "構造", label: "構造", items: RULER_CATEGORY_ITEMS["構造"] },
+      ...stampGroups.map(g => ({ key: `GRP_${g.name}`, label: g.name, items: g.items || [] }))
+    ];
+
+    if (!allTabs.some(t => t.key === this.activeRulerCat)) {
+      this.activeRulerCat = "高";
+    }
+
+    catsEl.innerHTML = allTabs.map(t => {
+      const active = t.key === this.activeRulerCat;
       return `
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 9px; background:#FFF; border:1px solid ${isArchived ? "#CBD5E1" : "#BFDBFE"}; border-radius:6px;">
-          <div style="flex:1;">
-            <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
-              <strong style="font-size:13px; color:#0F172A;">${displayTitle}</strong>
-              ${isArchived
-                ? `<span style="font-size:10px; background:#DCFCE7; color:#166534; font-weight:700; padding:1px 5px; border-radius:4px;">✅ 已完工封存</span>`
-                : (isOnHome
-                    ? `<span style="font-size:10px; background:#DBEAFE; color:#1D4ED8; padding:1px 5px; border-radius:4px;">已在首頁</span>`
-                    : `<span style="font-size:10px; background:#FEF08A; color:#854D0E; font-weight:700; padding:1px 5px; border-radius:4px;">🆕 可召喚</span>`)}
-            </div>
-            <div style="font-size:11px; color:#64748B; margin-top:2px;">🕒 ${formatUpdatedTime(p.updatedAt)} · 共 ${(p.pages || []).length} 頁</div>
-          </div>
-          <div>
-            ${isArchived
-              ? `<button class="btn-outline btn-sm summon-unarchive-btn" data-sid="${p.id}" style="color:#D97706; border-color:#FCD34D;">↩ 解除封存</button>`
-              : `<button class="btn-solid btn-sm summon-open-btn" data-sid="${p.id}">📣 召喚開啟</button>`}
-          </div>
-        </div>
+        <button type="button" class="mc-rcat-btn" data-rcat="${t.key}"
+                style="padding:3px 9px; font-size:11px; border-radius:5px; border:1px solid ${active ? "#0F172A" : "#CBD5E1"}; background:${active ? "#0F172A" : "#F8FAFC"}; color:${active ? "#FFF" : "#334155"}; font-weight:800; cursor:pointer; white-space:nowrap;">
+          ${t.label}
+        </button>
       `;
     }).join("");
 
-    listBody.querySelectorAll(".summon-open-btn").forEach(btn => {
-      btn.onclick = async () => {
-        const found = combinedList.find(p => p.id === btn.dataset.sid);
-        if (!found) return;
-        const s = getHiddenIds(); s.delete(found.id); saveHiddenIds(s);
-        upsertLocalProject(found);
-        await openProjectLightweight(found);
+    catsEl.querySelectorAll(".mc-rcat-btn").forEach(b => {
+      b.onclick = () => {
+        this.activeRulerCat = b.dataset.rcat;
+        this.renderRulerItemsUI();
       };
     });
 
-    listBody.querySelectorAll(".summon-unarchive-btn").forEach(btn => {
-      btn.onclick = async () => {
-        const found = combinedList.find(p => p.id === btn.dataset.sid);
-        if (!found) return;
-        found.archived = false; found.updatedAt = Date.now();
-        const slimPages = (found.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-        await setDoc(doc(db, PROJ_COL, found.id), { ...found, pages: slimPages });
-        const s = getHiddenIds(); s.delete(found.id); saveHiddenIds(s);
-        upsertLocalProject(found);
-        cachedCloudActiveList = null; cachedCloudArchivedList = null;
-        renderProjectList({ openSummon: true, forceFetchCloud: true });
-      };
-    });
-  } catch (err) {
-    listBody.innerHTML = `<div style="font-size:12px; color:#DC2626; padding:8px;">雲端查詢失敗：${err.message || err}</div>`;
-  }
-}
+    const curTab = allTabs.find(t => t.key === this.activeRulerCat) || allTabs[0];
+    const list = curTab?.items || [];
 
-async function openDatabaseCleaner() {
-  const box = document.getElementById("db-cleaner-box");
-  const body = document.getElementById("cleaner-body");
-  box.classList.remove("hidden");
-  body.innerHTML = `正在按需掃描重複工程、零碎空檔與孤兒圖片...`;
-  try {
-    const projSnap = await getDocs(collection(db, PROJ_COL));
-    const rawProjects = [];
-    projSnap.forEach(d => rawProjects.push({ id: d.id, ...d.data() }));
-    const mediaSnap = await getDocs(collection(db, MEDIA_COL));
-    const allMediaDocs = [];
-    mediaSnap.forEach(d => allMediaDocs.push({ id: d.id, ...d.data() }));
-
-    const groups = new Map();
-    rawProjects.forEach(p => {
-      const key = p.legacySourceId ? `SRC_${p.legacySourceId}` : `NAME_${cleanProjectTitle(p.name)}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(p);
-    });
-
-    const duplicateProjs = [];
-    const keptProjs = [];
-    groups.forEach(list => {
-      list.sort((a, b) => (countProjectAnnotations(b) * 1000000 + (b.updatedAt || 0)) - (countProjectAnnotations(a) * 1000000 + (a.updatedAt || 0)));
-      keptProjs.push(list[0]);
-      for (let i = 1; i < list.length; i++) duplicateProjs.push(list[i]);
-    });
-
-    const emptyProjs = keptProjs.filter(p => !(p.pages || []).length);
-    const validMediaSet = new Set();
-    keptProjs.forEach(p => (p.pages || []).forEach(pg => { if (pg.mediaRefId) validMediaSet.add(String(pg.mediaRefId)); }));
-    const orphanMediaDocs = allMediaDocs.filter(m => !validMediaSet.has(String(m.id)));
-
-    if (!duplicateProjs.length && !emptyProjs.length && !orphanMediaDocs.length) {
-      body.innerHTML = `<div style="color:#059669; font-weight:700; padding:6px 0;">✅ 資料庫非常乾淨！</div>`;
+    if (!list.length) {
+      itemsEl.innerHTML = `<div style="font-size:11px; color:#64748B;">此分類尚無項目，點右下「詞庫」新增。</div>`;
       return;
     }
 
-    body.innerHTML = `
-      <div style="margin-bottom:8px;">
-        • 重複副本：<strong>${duplicateProjs.length}</strong> 筆 ｜ 空工程：<strong>${emptyProjs.length}</strong> 筆 ｜ 孤兒圖片：<strong>${orphanMediaDocs.length}</strong> 張
-      </div>
-      <button id="btn-exec-clean" class="btn-solid btn-sm" style="background:#DC2626; border-color:#DC2626;">🧹 一鍵清理全部多餘資料</button>
-    `;
-    document.getElementById("btn-exec-clean").onclick = async () => {
-      if (!confirm("確定清理以上重複與孤兒資料嗎？")) return;
-      for (const dp of [...duplicateProjs, ...emptyProjs]) {
-        await deleteDoc(doc(db, PROJ_COL, dp.id)).catch(() => {});
-        removeLocalProjectById(dp.id);
-      }
-      for (const om of orphanMediaDocs) {
-        await deleteDoc(doc(db, MEDIA_COL, om.id)).catch(() => {});
-      }
-      cachedCloudActiveList = null; cachedCloudArchivedList = null;
-      renderProjectList();
-    };
-  } catch (err) {
-    body.innerHTML = `<span style="color:#DC2626;">掃描失敗：${err.message || err}</span>`;
-  }
-}
+    itemsEl.innerHTML = list.map(lbl => `
+      <button type="button" class="mc-ritem-btn" data-ritem="${lbl}"
+              style="background:#FFF; border:1px solid #CBD5E1; border-radius:5px; padding:3px 8px; font-size:12px; font-weight:700; color:#1E293B; cursor:pointer;">
+        ${lbl}
+      </button>
+    `).join("");
 
-async function ensureSinglePagePhoto(proj, page) {
-  if (!page) return "";
-  if (page.sitePhotoUrl && page.sitePhotoUrl.length > 50) { memoryPhotoCache.set(page.id, page.sitePhotoUrl); return page.sitePhotoUrl; }
-  if (memoryPhotoCache.has(page.id)) { page.sitePhotoUrl = memoryPhotoCache.get(page.id); return page.sitePhotoUrl; }
-  if (page.mediaRefId) {
-    try {
-      const mDoc = await getDoc(doc(db, MEDIA_COL, String(page.mediaRefId)));
-      if (mDoc.exists() && mDoc.data().imageData) {
-        page.sitePhotoUrl = mDoc.data().imageData;
-        memoryPhotoCache.set(page.id, page.sitePhotoUrl);
-        return page.sitePhotoUrl;
-      }
-    } catch (_) {}
-  }
-  if (proj && proj.legacySourceId && page.legacyMediaId) {
-    const url = await resolveLegacyMediaPhoto(proj.legacySourceId, page.legacyMediaId);
-    if (url) { page.sitePhotoUrl = url; memoryPhotoCache.set(page.id, url); return url; }
-  }
-  return "";
-}
-
-async function openProjectLightweight(proj) {
-  root.innerHTML = `<div class="card">載入空間圖集目錄中...</div>`;
-  try {
-    const freshSnap = await getDoc(doc(db, PROJ_COL, proj.id));
-    if (freshSnap.exists()) {
-      const freshData = { id: freshSnap.id, ...freshSnap.data() };
-      (freshData.pages || []).forEach(pg => { if (memoryPhotoCache.has(pg.id)) pg.sitePhotoUrl = memoryPhotoCache.get(pg.id); });
-      upsertLocalProject(freshData);
-      openProject(freshData);
-      return;
-    }
-  } catch (_) {}
-  openProject(proj);
-}
-
-async function resolveLegacyMediaPhoto(projectDocId, mediaDocId) {
-  if (!mediaDocId) return "";
-  try {
-    const chunksSnap = await getDocs(collection(db, "site_projects", String(projectDocId), "media", String(mediaDocId), "chunks"));
-    const list = [];
-    chunksSnap.forEach(c => list.push(c.data()));
-    if (!list.length) return "";
-    list.sort((a, b) => (a.index || 0) - (b.index || 0));
-    let combined = list.map(c => c.data || "").join("");
-    if (combined && !combined.startsWith("data:image") && !combined.startsWith("http")) combined = "data:image/jpeg;base64," + combined;
-    return combined;
-  } catch (_) { return ""; }
-}
-
-function openProject(proj) {
-  currentProject = proj;
-  activePageIdx = -1;
-  compareSpaceName = null;
-  filterSpace = "ALL";
-  filterCategory = "ALL";
-  renderWorkspace();
-}
-
-async function saveCurrentProject() {
-  if (!currentProject) return;
-  const syncEl = document.getElementById("top-auto-save-status");
-  if (syncEl) {
-    syncEl.textContent = "⏳ 同步中...";
-    syncEl.style.color = "#D97706";
-  }
-  currentProject.updatedAt = Date.now();
-  const slimPages = (currentProject.pages || []).map(p => {
-    if (p.sitePhotoUrl) memoryPhotoCache.set(p.id, p.sitePhotoUrl);
-    return { ...p, sitePhotoUrl: "" };
-  });
-  await setDoc(doc(db, PROJ_COL, currentProject.id), { ...currentProject, pages: slimPages });
-  upsertLocalProject(currentProject);
-  if (syncEl) {
-    syncEl.textContent = "☁️ 已自動儲存";
-    syncEl.style.color = "#059669";
-  }
-}
-
-function getSpaceRank(sp) {
-  if (!sp || sp === "未標空間") return 999;
-  if (sp === "總圖") return 0;
-  const order = currentProject?.spaceOrder || [];
-  const idx = order.indexOf(sp);
-  return idx === -1 ? 500 : idx + 1;
-}
-
-function renderWorkspace() {
-  if (compareSpaceName) { renderSideBySideCompare(compareSpaceName); return; }
-  if (activePageIdx >= 0 && currentProject.pages[activePageIdx]) { renderSinglePageEditor(currentProject.pages[activePageIdx]); return; }
-  activeCanvasInstance = null;
-  renderOverview();
-}
-
-function renderOverview() {
-  const myGen = ++overviewRenderGeneration;
-  const pages = currentProject.pages || [];
-  const displayTitle = cleanProjectTitle(currentProject.name);
-  const contacts = Array.isArray(currentProject.contacts) ? currentProject.contacts : [];
-  const allSpaces = [...new Set(pages.map(p => p.space || "未標空間"))].sort((a, b) => getSpaceRank(a) - getSpaceRank(b));
-
-  const catCounts = { ALL: pages.length, "度尺圖": 0, "平面圖": 0, "繪圖": 0, "效果圖": 0 };
-  let fixTotal = 0;
-  pages.forEach(p => {
-    const cat = normalizePageCategory(p);
-    catCounts[cat] = (catCounts[cat] || 0) + 1;
-    (p.reviewLogs || []).forEach(r => { if (normalizeReviewStatus(r.status) === "NEED_FIX") fixTotal++; });
-  });
-
-  const filteredPages = pages.filter(p => {
-    const spOk = filterSpace === "ALL" || (p.space || "未標空間") === filterSpace;
-    const catOk = filterCategory === "ALL" || normalizePageCategory(p) === filterCategory;
-    return spOk && catOk;
-  });
-
-  const groupsMap = new Map();
-  filteredPages.forEach(p => {
-    const sp = p.space || "未標空間";
-    if (!groupsMap.has(sp)) groupsMap.set(sp, []);
-    groupsMap.get(sp).push(p);
-  });
-
-  const sortedGroups = Array.from(groupsMap.entries())
-    .sort((a, b) => getSpaceRank(a[0]) - getSpaceRank(b[0]))
-    .map(([sp, items]) => [sp, [...items].sort((a, b) => (CAT_RANK[normalizePageCategory(a)] || 9) - (CAT_RANK[normalizePageCategory(b)] || 9))]);
-
-  root.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 10px; background:#FFF; border:1px solid #E2E8F0; border-radius:8px; margin-bottom:6px;">
-      <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-        <button id="btn-back-list" class="btn-outline btn-sm">‹ 目錄</button>
-        <strong style="font-size:15px; color:#0F172A;">${displayTitle}</strong>
-        <button id="btn-overview-contact" title="隨手臨時聯絡記錄"
-                style="background:${contacts.length > 0 ? "#FEF3C7" : "#F1F5F9"}; color:${contacts.length > 0 ? "#92400E" : "#475569"}; border:1px solid ${contacts.length > 0 ? "#F59E0B" : "#CBD5E1"}; border-radius:999px; padding:1px 7px; font-size:12px; font-weight:700; cursor:pointer;">
-          👤${contacts.length > 0 ? ` ${contacts.length}` : ""}
-        </button>
-        <button id="btn-overview-rename" title="修改工程名稱"
-                style="background:none; border:1px solid #E2E8F0; border-radius:5px; padding:1px 5px; font-size:11px; color:#64748B; cursor:pointer;">✏️</button>
-      </div>
-      <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
-        <button id="btn-cloud-dict-open" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">⚙️ 雲端詞庫</button>
-        <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#FCA5A5; color:#DC2626; font-weight:700;">
-          📋 批改總表${fixTotal > 0 ? ` (${fixTotal})` : ""}
-        </button>
-        <button id="btn-add-space" class="btn-outline btn-sm">+ 空間</button>
-        <button id="btn-open-report" class="btn-solid btn-sm">客戶報告</button>
-      </div>
-    </div>
-
-    <div id="overview-contact-box" class="hidden" style="margin-bottom:6px;">${renderContactDrawerHtml(currentProject)}</div>
-
-    <div id="project-review-board" class="card hidden" style="background:#FFFBFB; border:1.5px solid #FCA5A5; margin-bottom:6px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <strong style="font-size:13px; color:#991B1B;">📋 本工程審圖批改總表（點擊狀態徽章可循環切換）</strong>
-        <button id="btn-close-review-board" class="btn-outline btn-sm">關閉</button>
-      </div>
-      <div id="project-review-list" style="display:flex; flex-direction:column; gap:5px; font-size:12px;"></div>
-    </div>
-
-    <div style="display:flex; align-items:center; justify-content:flex-start; gap:8px; padding:4px 8px; background:#FFF; border:1px solid #E2E8F0; border-radius:999px; margin-bottom:8px; overflow-x:auto; white-space:nowrap;">
-      <div style="display:flex; align-items:center; gap:4px;">
-        <button id="btn-space-sort-toggle" title="調整空間先後次序"
-                style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:999px; padding:2px 7px; font-size:11px; font-weight:800; color:#334155; cursor:pointer;">
-          ⇅ 排序
-        </button>
-        <button class="slim-chip ${filterSpace === "ALL" ? "active" : ""}" data-fsp="ALL">全部空間</button>
-        ${allSpaces.map(sp => `<button class="slim-chip ${filterSpace === sp ? "active" : ""}" data-fsp="${sp}">${sp}</button>`).join("")}
-        <button id="btn-preset-space-gear" title="加減預設空間清單"
-                style="background:#F8FAFC; border:1px solid #CBD5E1; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">
-          ⚙️
-        </button>
-      </div>
-
-      <div style="display:flex; align-items:center; gap:4px; padding-left:8px; border-left:1.5px solid #CBD5E1;">
-        <button class="slim-chip ${filterCategory === "ALL" ? "active" : ""}" data-fcat="ALL">全部(${pages.length})</button>
-        ${CORE_CATEGORIES.map(cat => `<button class="slim-chip ${filterCategory === cat ? "active" : ""}" data-fcat="${cat}">${cat}(${catCounts[cat] || 0})</button>`).join("")}
-      </div>
-    </div>
-
-    <div id="space-sort-drawer" class="hidden" style="background:#FFF; border:1px solid #CBD5E1; border-radius:8px; padding:8px 10px; margin-bottom:8px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <strong style="font-size:12px; color:#1E293B;">⇅ 調整空間顯示次序（即時自動儲存）</strong>
-        <button id="btn-close-space-sort" class="btn-outline btn-sm" style="padding:1px 7px; font-size:11px;">完成</button>
-      </div>
-      <div style="display:flex; flex-wrap:wrap; gap:6px;">
-        ${allSpaces.filter(s => s !== "總圖" && s !== "未標空間").map((sp, idx, arr) => `
-          <div style="display:flex; align-items:center; gap:4px; background:#F8FAFC; border:1px solid #CBD5E1; border-radius:6px; padding:3px 7px; font-size:12px;">
-            <strong>${sp}</strong>
-            <button class="btn-sp-move" data-spname="${sp}" data-dir="-1" ${idx === 0 ? "disabled" : ""} style="border:1px solid #CBD5E1; background:#FFF; border-radius:4px; padding:0 5px; cursor:pointer;">↑</button>
-            <button class="btn-sp-move" data-spname="${sp}" data-dir="1" ${idx === arr.length - 1 ? "disabled" : ""} style="border:1px solid #CBD5E1; background:#FFF; border-radius:4px; padding:0 5px; cursor:pointer;">↓</button>
-          </div>
-        `).join("") || `<span style="font-size:12px; color:#64748B;">目前沒有可排序的多個空間。</span>`}
-      </div>
-    </div>
-
-    <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}" style="margin-bottom:8px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <div class="section-title" style="margin:0;">第一步：點選空間</div>
-        <button id="btn-picker-manage-sp" class="btn-outline btn-sm" style="font-size:11px;">⚙️ 加減預設空間</button>
-      </div>
-      <div class="chip-grid" id="picker-spaces" style="margin-bottom:8px;"></div>
-      <div class="section-title">第二步：選擇訂造櫃體（選填）</div>
-      <div class="chip-grid" id="picker-cabs" style="margin-bottom:10px;"></div>
-      <div style="display:flex; gap:6px; flex-wrap:wrap;">
-        <input type="text" id="custom-page-title" placeholder="或直接輸入空間名稱" style="flex:1; min-width:160px; padding:5px 8px; border:1px solid #111827; border-radius:4px; font-size:13px;" />
-        <select id="new-page-doctype" style="padding:5px 8px; border:1px solid #111827; border-radius:4px; font-size:13px; font-weight:700;">
-          <option value="度尺圖">度尺圖</option>
-          <option value="平面圖">平面圖</option>
-          <option value="繪圖">繪圖</option>
-          <option value="效果圖">效果圖</option>
-        </select>
-        <button id="btn-confirm-page" class="btn-solid btn-sm">建立</button>
-      </div>
-    </div>
-
-    <input type="file" id="quick-replace-measure-input" accept="image/*" class="hidden" />
-
-    <div id="main-gallery-host"></div>
-
-    <style>
-      .slim-chip { background:transparent; border:1px solid transparent; border-radius:999px; padding:2px 8px; font-size:12px; font-weight:600; color:#475569; cursor:pointer; }
-      .slim-chip:hover { background:#F1F5F9; }
-      .slim-chip.active { background:#0F172A; color:#FFFFFF; }
-    </style>
-  `;
-
-  document.getElementById("btn-back-list").onclick = () => renderProjectList();
-  document.getElementById("btn-add-space").onclick = () => document.getElementById("dict-picker-box").classList.toggle("hidden");
-  document.getElementById("btn-cloud-dict-open").onclick = () => openCloudDictModal("STAMP");
-  document.getElementById("btn-preset-space-gear").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
-  document.getElementById("btn-picker-manage-sp").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
-
-  document.getElementById("btn-overview-contact").onclick = () => document.getElementById("overview-contact-box").classList.toggle("hidden");
-  bindContactEvents([currentProject], () => {
-    renderOverview();
-    document.getElementById("overview-contact-box")?.classList.remove("hidden");
-  });
-
-  document.getElementById("btn-overview-rename").onclick = async () => {
-    const nextName = prompt("修改工程名稱：", cleanProjectTitle(currentProject.name));
-    if (nextName === null) return;
-    const trimmed = cleanProjectTitle(nextName);
-    if (!trimmed || trimmed === currentProject.name) return;
-    await renameProjectEverywhere(currentProject, trimmed);
-    renderOverview();
-  };
-
-  document.getElementById("btn-open-report").onclick = async () => {
-    root.innerHTML = `<div class="card">正在為報告預覽按需載入底圖...</div>`;
-    await Promise.all((currentProject.pages || []).map(pg => ensureSinglePagePhoto(currentProject, pg)));
-    renderReportBuilder(root, currentProject, renderWorkspace);
-  };
-
-  document.getElementById("btn-review-board").onclick = () => {
-    const board = document.getElementById("project-review-board");
-    board.classList.toggle("hidden");
-    if (!board.classList.contains("hidden")) renderProjectReviewList();
-  };
-  document.getElementById("btn-close-review-board").onclick = () => document.getElementById("project-review-board").classList.add("hidden");
-
-  document.getElementById("btn-space-sort-toggle").onclick = () => document.getElementById("space-sort-drawer").classList.toggle("hidden");
-  document.getElementById("btn-close-space-sort").onclick = () => document.getElementById("space-sort-drawer").classList.add("hidden");
-
-  const sortableSpaces = allSpaces.filter(s => s !== "總圖" && s !== "未標空間");
-  root.querySelectorAll(".btn-sp-move").forEach(btn => {
-    btn.onclick = async () => {
-      const spName = btn.dataset.spname;
-      const dir = Number(btn.dataset.dir);
-      const nextOrder = [...sortableSpaces];
-      const idx = nextOrder.indexOf(spName);
-      if (idx === -1 || idx + dir < 0 || idx + dir >= nextOrder.length) return;
-      [nextOrder[idx], nextOrder[idx + dir]] = [nextOrder[idx + dir], nextOrder[idx]];
-      currentProject.spaceOrder = nextOrder;
-      await saveCurrentProject();
-      renderOverview();
-      document.getElementById("space-sort-drawer")?.classList.remove("hidden");
-    };
-  });
-
-  root.querySelectorAll("[data-fsp]").forEach(btn => { btn.onclick = () => { filterSpace = btn.dataset.fsp; renderOverview(); }; });
-  root.querySelectorAll("[data-fcat]").forEach(btn => { btn.onclick = () => { filterCategory = btn.dataset.fcat; renderOverview(); }; });
-
-  setupDictPicker();
-  renderFlatExpandedGallery(document.getElementById("main-gallery-host"), sortedGroups, pages, allSpaces, myGen);
-}
-
-function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, renderGen) {
-  let pendingReplaceSpace = null;
-  const replaceInput = document.getElementById("quick-replace-measure-input");
-
-  replaceInput.onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file || !pendingReplaceSpace) return;
-    const spPages = (currentProject.pages || []).filter(p => (p.space || "未標空間") === pendingReplaceSpace);
-    let targetPage = spPages.find(p => normalizePageCategory(p) === "度尺圖");
-    if (!targetPage) {
-      targetPage = {
-        id: "PG_" + Date.now(),
-        pageNum: `P${currentProject.pages.length + 1}`,
-        space: pendingReplaceSpace,
-        docTypeLabel: "度尺圖",
-        title: `${pendingReplaceSpace} · 度尺圖`,
-        sitePhotoUrl: "",
-        lines: [], markers: [], paths: [], arrows: [], stickers: [], overlays: [], reviewLogs: []
-      };
-      currentProject.pages.push(targetPage);
-    }
-    const res = await uploadMediaToCloud(currentProject.id, targetPage.id, file);
-    targetPage.sitePhotoUrl = res.imageData;
-    targetPage.docTypeLabel = "度尺圖";
-    memoryPhotoCache.set(targetPage.id, res.imageData);
-    await saveCurrentProject();
-    pendingReplaceSpace = null;
-    replaceInput.value = "";
-    renderOverview();
-  };
-
-  host.innerHTML = `
-    <div style="display:flex; flex-direction:column; gap:12px;">
-      ${sortedGroups.map(([spaceName, items]) => `
-        <div style="background:#FFF; border:1px solid #E2E8F0; border-radius:10px; padding:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
-            <div style="display:flex; align-items:center; gap:6px;">
-              <strong style="font-size:15px; color:#0F172A;">${spaceName}</strong>
-              <span style="font-size:11px; background:#F1F5F9; color:#475569; padding:1px 7px; border-radius:999px; font-weight:700;">${items.length}張</span>
-            </div>
-            <div style="display:flex; gap:6px; flex-wrap:wrap;">
-              <button class="btn-quick-replace-measure" data-rspace="${spaceName}"
-                      style="background:#F0FDF4; color:#166534; border:1px solid #BBF7D0; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
-                📷 替換度尺圖
-              </button>
-              <button class="btn-quick-compare" data-cspace="${spaceName}"
-                      style="background:#EFF6FF; color:#1D4ED8; border:1px solid #BFDBFE; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">
-                ⚖️ 左右對照
-              </button>
-            </div>
-          </div>
-
-          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(225px, 1fr)); gap:9px;">
-            ${items.map(p => {
-              const realIdx = allPages.indexOf(p);
-              const cat = normalizePageCategory(p);
-              const cachedUrl = p.sitePhotoUrl || memoryPhotoCache.get(p.id) || "";
-              const annCnt = (p.lines || []).length + (p.markers || []).length + (p.paths || []).length + (p.arrows || []).length;
-              return `
-                <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; overflow:hidden; display:flex; flex-direction:column;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 8px; background:#FFF; border-bottom:1px solid #F1F5F9; font-size:12px; gap:4px;">
-                    <div style="display:flex; align-items:center; gap:4px;">
-                      <strong style="color:#1E293B; cursor:pointer;" data-open-idx="${realIdx}">${p.pageNum || `P${realIdx + 1}`}</strong>
-                      <span style="color:#94A3B8;">·</span>
-                      <button type="button" class="btn-card-cat-tap" data-pidx="${realIdx}" title="點擊點選改分類或空間"
-                              style="background:#EFF6FF; color:#1D4ED8; border:1px solid #BFDBFE; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:800; cursor:pointer;">
-                        ${cat}
-                      </button>
-                    </div>
-                    <div style="display:flex; align-items:center; gap:4px;">
-                      ${annCnt > 0 ? `<span style="font-size:10px; background:#EFF6FF; color:#1D4ED8; padding:1px 5px; border-radius:4px; font-weight:700;">📐${annCnt}</span>` : ""}
-                    </div>
-                  </div>
-                  <div id="thumb-slot-${p.id}" data-open-idx="${realIdx}" style="height:165px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
-                    ${cachedUrl
-                      ? `<img src="${cachedUrl}" style="width:100%; height:100%; object-fit:contain;" />`
-                      : `<div style="text-align:center; color:#94A3B8; font-size:11px;">載入縮圖中...</div>`}
-                  </div>
-                </div>
-              `;
-            }).join("")}
-          </div>
-        </div>
-      `).join("")}
-    </div>
-  `;
-
-  host.querySelectorAll("[data-open-idx]").forEach(el => {
-    el.onclick = () => { activePageIdx = Number(el.dataset.openIdx); renderWorkspace(); };
-  });
-
-  host.querySelectorAll(".btn-card-cat-tap").forEach(btn => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const pg = allPages[Number(btn.dataset.pidx)];
-      if (!pg) return;
-      openQuickReassignModal(pg, allSpaces, () => renderOverview());
-    };
-  });
-
-  host.querySelectorAll(".btn-quick-replace-measure").forEach(btn => {
-    btn.onclick = (e) => { e.stopPropagation(); pendingReplaceSpace = btn.dataset.rspace; replaceInput.click(); };
-  });
-
-  host.querySelectorAll(".btn-quick-compare").forEach(btn => {
-    btn.onclick = (e) => { e.stopPropagation(); compareSpaceName = btn.dataset.cspace; renderWorkspace(); };
-  });
-
-  const visiblePagesToLoad = sortedGroups.flatMap(([, items]) => items).filter(p => !(p.sitePhotoUrl || memoryPhotoCache.get(p.id)));
-  (async () => {
-    const batchSize = 6;
-    for (let i = 0; i < visiblePagesToLoad.length; i += batchSize) {
-      if (renderGen !== overviewRenderGeneration || activePageIdx >= 0 || compareSpaceName) return;
-      const chunk = visiblePagesToLoad.slice(i, i + batchSize);
-      await Promise.all(chunk.map(async (pg) => {
-        const url = await ensureSinglePagePhoto(currentProject, pg);
-        if (renderGen !== overviewRenderGeneration) return;
-        const slot = document.getElementById(`thumb-slot-${pg.id}`);
-        if (slot) {
-          slot.innerHTML = url
-            ? `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />`
-            : `<div style="text-align:center; color:#64748B; font-size:11px;">點擊開啟「${normalizePageCategory(pg)}」</div>`;
+    itemsEl.querySelectorAll(".mc-ritem-btn").forEach(b => {
+      b.onclick = () => {
+        const raw = b.dataset.ritem;
+        const match = raw.match(/^(.+?)\(([闊高深厚]+)\)$/);
+        if (match) {
+          this.openRulerMultiDimSplit(match[1].trim(), match[2]);
+          return;
         }
-      }));
-    }
-  })();
-}
-
-async function renderSideBySideCompare(spaceName) {
-  const allPages = currentProject.pages || [];
-  const spacePages = allPages.filter(p => (p.space || "未標空間") === spaceName);
-  if (!spacePages.length) { compareSpaceName = null; renderOverview(); return; }
-
-  let leftPage = spacePages.find(p => normalizePageCategory(p) === "度尺圖") || spacePages[0];
-  let rightPage = spacePages.find(p => normalizePageCategory(p) !== "度尺圖") || spacePages[Math.min(1, spacePages.length - 1)];
-
-  root.innerHTML = `
-    <div style="position:fixed; inset:0; width:100vw; height:100vh; background:#F8FAFC; display:flex; flex-direction:column; z-index:920;">
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 10px; background:#FFF; border-bottom:1px solid #E2E8F0; gap:6px; flex-wrap:wrap;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <button id="btn-exit-compare" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:4px 10px; font-size:12px; font-weight:800; cursor:pointer;">‹ 返回圖集</button>
-          <strong style="font-size:14px; color:#0F172A;">⚖️ 左右對照檢查 · ${spaceName}</strong>
-        </div>
-        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-          <select id="cmp-left-sel" style="padding:3px 6px; border:1px solid #86EFAC; background:#F0FDF4; border-radius:5px; font-size:12px; font-weight:700; color:#166534;">
-            ${spacePages.map((p, i) => `<option value="${i}" ${p === leftPage ? "selected" : ""}>左：${p.pageNum || `P${i + 1}`} ${normalizePageCategory(p)}</option>`).join("")}
-          </select>
-          <select id="cmp-right-sel" style="padding:3px 6px; border:1px solid #93C5FD; background:#EFF6FF; border-radius:5px; font-size:12px; font-weight:700; color:#1D4ED8;">
-            ${spacePages.map((p, i) => `<option value="${i}" ${p === rightPage ? "selected" : ""}>右：${p.pageNum || `P${i + 1}`} ${normalizePageCategory(p)}</option>`).join("")}
-          </select>
-        </div>
-      </div>
-
-      <div style="flex:1; display:grid; grid-template-columns:1fr 1fr; gap:4px; background:#E2E8F0; overflow:hidden;">
-        <div style="background:#FFF; display:flex; flex-direction:column; overflow:hidden;">
-          <div style="display:flex; justify-content:space-between; align-items:center; padding:3px 8px; background:#F0FDF4; border-bottom:1px solid #DCFCE7; font-size:11px;">
-            <strong id="cmp-left-title" style="color:#166534;">左圖：${normalizePageCategory(leftPage)}</strong>
-            <button id="btn-cmp-edit-left" style="background:#16A34A; color:#FFF; border:none; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:700; cursor:pointer;">✏️ 全屏批改左圖</button>
-          </div>
-          <div id="cmp-left-body" style="flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; padding:6px;">
-            <span style="color:#94A3B8; font-size:12px;">載入左圖中...</span>
-          </div>
-        </div>
-
-        <div style="background:#FFF; display:flex; flex-direction:column; overflow:hidden;">
-          <div style="display:flex; justify-content:space-between; align-items:center; padding:3px 8px; background:#EFF6FF; border-bottom:1px solid #DBEAFE; font-size:11px;">
-            <strong id="cmp-right-title" style="color:#1D4ED8;">右圖：${normalizePageCategory(rightPage)}</strong>
-            <button id="btn-cmp-edit-right" style="background:#2563EB; color:#FFF; border:none; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:700; cursor:pointer;">✏️ 全屏批改右圖</button>
-          </div>
-          <div id="cmp-right-body" style="flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; padding:6px;">
-            <span style="color:#94A3B8; font-size:12px;">載入右圖中...</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const renderBothImages = async () => {
-    const lUrl = await ensureSinglePagePhoto(currentProject, leftPage);
-    const rUrl = await ensureSinglePagePhoto(currentProject, rightPage);
-    const lBody = document.getElementById("cmp-left-body");
-    const rBody = document.getElementById("cmp-right-body");
-    document.getElementById("cmp-left-title").textContent = `左圖：${leftPage.pageNum || ""} ${normalizePageCategory(leftPage)}`;
-    document.getElementById("cmp-right-title").textContent = `右圖：${rightPage.pageNum || ""} ${normalizePageCategory(rightPage)}`;
-    if (lBody) lBody.innerHTML = lUrl ? `<img src="${lUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : `<span style="color:#94A3B8; font-size:12px;">此頁尚未上傳圖片</span>`;
-    if (rBody) rBody.innerHTML = rUrl ? `<img src="${rUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />` : `<span style="color:#94A3B8; font-size:12px;">此頁尚未上傳圖片</span>`;
-  };
-
-  document.getElementById("btn-exit-compare").onclick = () => { compareSpaceName = null; renderOverview(); };
-  document.getElementById("cmp-left-sel").onchange = (e) => { leftPage = spacePages[Number(e.target.value)]; renderBothImages(); };
-  document.getElementById("cmp-right-sel").onchange = (e) => { rightPage = spacePages[Number(e.target.value)]; renderBothImages(); };
-  document.getElementById("btn-cmp-edit-left").onclick = () => { compareSpaceName = null; activePageIdx = allPages.indexOf(leftPage); renderWorkspace(); };
-  document.getElementById("btn-cmp-edit-right").onclick = () => { compareSpaceName = null; activePageIdx = allPages.indexOf(rightPage); renderWorkspace(); };
-
-  await renderBothImages();
-}
-
-function renderProjectReviewList() {
-  const host = document.getElementById("project-review-list");
-  if (!host) return;
-  const rows = [];
-  (currentProject.pages || []).forEach((p, pIdx) => {
-    (p.reviewLogs || []).forEach((log, lIdx) => rows.push({ p, pIdx, log, lIdx }));
-  });
-
-  if (!rows.length) {
-    host.innerHTML = `<div style="color:#6B7280; padding:6px 0;">尚無審圖批改記錄。</div>`;
-    return;
+        this.rulerBox.querySelector(".mc-ruler-split-box")?.classList.add("hidden");
+        this.activeRulerTargetInput = this.rulerInput;
+        const cur = this.rulerInput.value.trim();
+        this.rulerInput.value = cur ? `${cur} ${raw}` : raw;
+      };
+    });
   }
 
-  host.innerHTML = rows.map(({ p, pIdx, log, lIdx }) => {
-    const stKey = normalizeReviewStatus(log.status);
-    const meta = REVIEW_STATUS_META[stKey];
-    return `
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 8px; background:#FFF; border:1px solid ${meta.border}; border-radius:6px;">
-        <div style="flex:1; cursor:pointer;" class="rev-jump-page" data-pidx="${pIdx}">
-          <div style="font-weight:700; color:#1E293B;">
-            ${p.pageNum || `P${pIdx + 1}`} ${p.space || ""} · ${normalizePageCategory(p)}
-            <span style="font-weight:400; color:#64748B; font-size:11px; margin-left:4px;">${log.time || ""}</span>
-          </div>
-          <div style="color:${meta.text}; margin-top:2px; font-weight:600;">${log.note}</div>
-        </div>
-        <button class="btn-outline btn-sm rev-cycle-status" data-pidx="${pIdx}" data-lidx="${lIdx}"
-                style="background:${meta.bg}; color:${meta.text}; border-color:${meta.border}; font-weight:800; white-space:nowrap;">
-          ${meta.label} ↻
-        </button>
-      </div>
-    `;
-  }).join("");
+  commitRulerEditor(shouldSave = true) {
+    if (!this.pendingRulerAction) return;
+    const val = this.rulerInput.value;
+    const fn = this.pendingRulerAction;
+    this.pendingRulerAction = null;
+    this.rulerBox.classList.add("hidden");
+    if (shouldSave) fn(val);
+    this.updateNearToolbar();
+  }
 
-  host.querySelectorAll(".rev-jump-page").forEach(el => { el.onclick = () => { activePageIdx = Number(el.dataset.pidx); renderWorkspace(); }; });
-  host.querySelectorAll(".rev-cycle-status").forEach(btn => {
-    btn.onclick = async () => {
-      const p = currentProject.pages[Number(btn.dataset.pidx)];
-      const log = p?.reviewLogs?.[Number(btn.dataset.lidx)];
-      if (!log) return;
-      const cur = normalizeReviewStatus(log.status);
-      log.status = STATUS_CYCLE_ORDER[(STATUS_CYCLE_ORDER.indexOf(cur) + 1) % STATUS_CYCLE_ORDER.length];
-      await saveCurrentProject();
-      renderProjectReviewList();
-    };
-  });
-}
+  openPlainTextEditor(screenX, screenY, initialText, onConfirm) {
+    this.hideAllEditors();
+    this.nearToolbar.style.display = "none";
+    this.pendingPlainTextAction = onConfirm;
+    this.plainInput.value = initialText || "";
+    this.plainTextBox.classList.remove("hidden");
+    const boxW = Math.min(220, this.viewW * 0.84);
+    const left = Math.max(10, Math.min(this.viewW - boxW - 10, screenX - boxW / 2));
+    const top = screenY + 75 > this.viewH ? Math.max(48, screenY - 75) : Math.max(48, screenY + 12);
+    this.plainTextBox.style.left = `${left}px`;
+    this.plainTextBox.style.top = `${top}px`;
+    setTimeout(() => { this.plainInput.focus(); this.plainInput.select(); }, 25);
+  }
 
-function setupDictPicker() {
-  let selSpace = "";
-  let selCab = "";
-  const titleInput = document.getElementById("custom-page-title");
-  if (!titleInput) return;
+  commitPlainText(shouldSave = true) {
+    if (!this.pendingPlainTextAction) return;
+    const val = this.plainInput.value;
+    const fn = this.pendingPlainTextAction;
+    this.pendingPlainTextAction = null;
+    this.plainTextBox.classList.add("hidden");
+    if (shouldSave) fn(val);
+    this.updateNearToolbar();
+  }
 
-  const updateTitle = () => { titleInput.value = [selSpace, selCab].filter(Boolean).join("-"); };
-  const cabItems = masterDict?.cabinetGroups?.flatMap(g => g.items) || [];
+  openArrowEditor(screenX, screenY, initialText, initialStatus, onConfirm) {
+    this.hideAllEditors();
+    this.nearToolbar.style.display = "none";
+    this.pendingArrowAction = onConfirm;
+    this.arrowInput.value = initialText || "";
+    this.selectedArrowStatus = initialStatus || "NEED_FIX";
+    this.updateArrowStatusPills();
 
-  document.getElementById("picker-spaces").innerHTML = cloudPresetSpaces.map(spName =>
-    `<button type="button" class="chip" data-sp="${spName}">${spName}</button>`
-  ).join("");
-  document.getElementById("picker-cabs").innerHTML = cabItems.map(i =>
-    `<button type="button" class="chip ${i.pinned ? "chip-pinned" : ""}" data-cb="${i.name}">${i.name}</button>`
-  ).join("");
+    this.arrowBox.classList.remove("hidden");
+    const boxW = Math.min(330, this.viewW * 0.92);
+    const boxH = 365;
+    const left = Math.max(10, Math.min(this.viewW - boxW - 10, screenX - boxW / 2));
+    const top = screenY + 24 + boxH > this.viewH ? Math.max(48, this.viewH - boxH - 12) : Math.max(48, screenY + 18);
 
-  document.querySelectorAll("[data-sp]").forEach(b => b.onclick = () => {
-    document.querySelectorAll("[data-sp]").forEach(x => x.classList.remove("active"));
-    selSpace = selSpace === b.dataset.sp ? "" : b.dataset.sp;
-    if (selSpace) b.classList.add("active");
-    updateTitle();
-  });
-  document.querySelectorAll("[data-cb]").forEach(b => b.onclick = () => {
-    document.querySelectorAll("[data-cb]").forEach(x => x.classList.remove("active"));
-    selCab = selCab === b.dataset.cb ? "" : b.dataset.cb;
-    if (selCab) b.classList.add("active");
-    updateTitle();
-  });
+    this.arrowBox.style.left = `${left}px`;
+    this.arrowBox.style.top = `${top}px`;
+    this.renderArrowPhraseUI();
+    setTimeout(() => { this.arrowInput.focus(); }, 25);
+  }
 
-  document.getElementById("btn-confirm-page").onclick = async () => {
-    const spaceVal = titleInput.value.trim();
-    const docTypeVal = document.getElementById("new-page-doctype").value;
-    if (!spaceVal) return;
-    currentProject.pages.push({
-      id: "PG_" + Date.now(),
-      pageNum: `P${currentProject.pages.length + 1}`,
-      space: spaceVal,
-      docTypeLabel: docTypeVal,
-      title: `${spaceVal} · ${docTypeVal}`,
-      sitePhotoUrl: "",
-      lines: [], markers: [], paths: [], arrows: [], stickers: [], overlays: [], reviewLogs: []
+  updateArrowStatusPills() {
+    this.arrowBox.querySelectorAll(".mc-st-pill").forEach(p => {
+      if (p.dataset.stkey === this.selectedArrowStatus) p.classList.add("active");
+      else p.classList.remove("active");
     });
-    activePageIdx = currentProject.pages.length - 1;
-    await saveCurrentProject();
-    renderWorkspace();
-  };
-}
+  }
 
-function createBlankWhiteDataUrl() {
-  const c = document.createElement("canvas");
-  c.width = 1600; c.height = 1200;
-  const ctx = c.getContext("2d");
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, c.width, c.height);
-  return c.toDataURL("image/jpeg", 0.92);
-}
+  renderArrowPhraseUI() {
+    const phrases = this.getPhraseBank();
+    const catsEl = this.arrowBox.querySelector(".mc-phrase-cats");
+    const itemsEl = this.arrowBox.querySelector(".mc-phrase-items");
+    if (!catsEl || !itemsEl) return;
 
-async function renderSinglePageEditor(page) {
-  const totalPages = currentProject.pages.length;
-  const catLabel = normalizePageCategory(page);
-  const currentSpace = page.space || "未標空間";
-  const allSpaces = [...new Set([...(currentProject.pages || []).map(p => p.space || "未標空間"), ...cloudPresetSpaces])].filter(Boolean);
-  const sameSpacePages = (currentProject.pages || []).filter(p => (p.space || "未標空間") === currentSpace);
-  if (!Array.isArray(page.reviewLogs)) page.reviewLogs = [];
-
-  const rawColors = Array.isArray(masterDict?.rulerColors) ? masterDict.rulerColors : [];
-  const paletteColors = rawColors.map(c => (typeof c === "string" ? c : (c?.hex || c?.color || c?.value || ""))).filter(Boolean);
-  const finalColors = paletteColors.length ? paletteColors : ["#DC2626", "#2563EB", "#059669", "#9333EA", "#EA580C", "#111827"];
-
-  root.innerHTML = `
-    <div id="fullscreen-editor-shell" style="position:fixed; inset:0; width:100vw; height:100vh; background:#F8FAFC; display:flex; flex-direction:column; z-index:900; overflow:hidden;">
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:#FFFFFF; border-bottom:1px solid #E2E8F0; flex-wrap:wrap; gap:5px; z-index:20;">
-        <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
-          <button id="btn-back-grid" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">‹ 返回圖集</button>
-          <strong style="font-size:13px; color:#0F172A;">${page.pageNum || `P${activePageIdx + 1}`}</strong>
-
-          <select id="ed-space-sel" title="更改所屬空間" style="padding:3px 5px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; color:#0F172A; background:#F8FAFC;">
-            ${allSpaces.map(sp => `<option value="${sp}" ${sp === currentSpace ? "selected" : ""}>${sp}</option>`).join("")}
-          </select>
-          <select id="ed-cat-sel" title="更改圖紙分類" style="padding:3px 5px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; color:#1D4ED8; background:#EFF6FF;">
-            ${CORE_CATEGORIES.map(c => `<option value="${c}" ${c === catLabel ? "selected" : ""}>${c}</option>`).join("")}
-          </select>
-          <span style="font-size:11px; color:#64748B;">(${activePageIdx + 1}/${totalPages})</span>
-
-          <button type="button" id="btn-toggle-space-strip"
-                  style="background:#F1F5F9; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">
-            🗂️ 本區圖集 (${sameSpacePages.length}) ▾
-          </button>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:5px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:999px; padding:2px 8px;">
-          <div id="top-color-dots" style="display:flex; align-items:center; gap:4px;">
-            ${finalColors.map((c, idx) => `
-              <button type="button" class="top-cdot" data-tcol="${c}"
-                      style="width:16px; height:16px; border-radius:50%; background-color:${c}; border:${idx === 0 ? "2.5px solid #0F172A" : "1px solid #64748B"}; cursor:pointer; padding:0; flex-shrink:0;"></button>
-            `).join("")}
-          </div>
-
-          <span style="color:#CBD5E1;">|</span>
-
-          <label style="display:flex; align-items:center; gap:3px; font-size:11px; color:#334155; white-space:nowrap;">
-            <span>幼細</span>
-            <input type="range" id="top-stroke-slider" min="0.5" max="8" step="0.5" value="1.5" style="width:48px; accent-color:#2563EB;" />
-            <span id="top-stroke-val" style="min-width:20px; font-weight:700;">1.5</span>
-          </label>
-
-          <button type="button" id="btn-top-reset-zoom" title="重置縮放置中" style="background:#FFF; border:1px solid #CBD5E1; border-radius:999px; padding:1px 7px; font-size:11px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">⊡ 置中</button>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
-          <button type="button" id="btn-top-arrow-mode" style="background:#FEF2F2; color:#DC2626; border:1.5px solid #FCA5A5; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">↗ 箭頭批改</button>
-          <button id="btn-toggle-white-bg" style="background:#F8FAFC; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:4px 7px; font-size:12px; font-weight:700; cursor:pointer;">📄 白底</button>
-          <button id="btn-page-review-drawer" style="background:#FFF; color:#991B1B; border:1px solid #FECACA; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:800; cursor:pointer;">
-            📝 記錄 (${page.reviewLogs.length})
-          </button>
-          <span id="top-auto-save-status" style="font-size:11px; font-weight:800; color:#059669; background:#ECFDF5; border:1px solid #A7F3D0; border-radius:999px; padding:3px 8px; white-space:nowrap;">☁️ 已自動儲存</span>
-          <label style="background:#F1F5F9; color:#334155; border:1px solid #CBD5E1; border-radius:6px; padding:4px 7px; font-size:12px; font-weight:700; cursor:pointer;">
-            📷 換底圖
-            <input type="file" id="up-site-photo" accept="image/*" class="hidden" />
-          </label>
-        </div>
-      </div>
-
-      <div id="ed-space-strip-drawer" class="hidden" style="background:rgba(255,255,255,0.96); border-bottom:1px solid #CBD5E1; padding:6px 10px; display:flex; align-items:center; gap:8px; overflow-x:auto; z-index:25; box-shadow:0 6px 16px rgba(15,23,42,0.08);">
-        ${sameSpacePages.map(spPg => {
-          const globalIdx = currentProject.pages.indexOf(spPg);
-          const isCur = spPg === page;
-          const cached = spPg.sitePhotoUrl || memoryPhotoCache.get(spPg.id) || "";
-          return `
-            <div class="strip-thumb-card" data-jump-idx="${globalIdx}"
-                 style="flex-shrink:0; width:96px; border:2px solid ${isCur ? "#2563EB" : "#CBD5E1"}; border-radius:7px; background:${isCur ? "#EFF6FF" : "#F8FAFC"}; overflow:hidden; cursor:pointer;">
-              <div style="font-size:10px; font-weight:800; padding:2px 5px; color:${isCur ? "#1D4ED8" : "#334155"}; background:#FFF; border-bottom:1px solid #E2E8F0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                ${spPg.pageNum || `P${globalIdx + 1}`} · ${normalizePageCategory(spPg)}
-              </div>
-              <div id="strip-img-${spPg.id}" style="height:56px; display:flex; align-items:center; justify-content:center; font-size:10px; color:#94A3B8;">
-                ${cached ? `<img src="${cached}" style="width:100%; height:100%; object-fit:contain;" />` : `載入中`}
-              </div>
-            </div>
-          `;
-        }).join("")}
-        <button type="button" id="btn-close-space-strip" style="flex-shrink:0; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:4px 8px; font-size:11px; color:#475569; cursor:pointer;">收起 ▴</button>
-      </div>
-
-      <!-- 全屏拉高版「📝 本頁審圖批改記錄」抽屜面板 -->
-      <div id="page-review-drawer" class="hidden" style="position:absolute; right:10px; top:42px; bottom:10px; width:min(410px, 95vw); height:calc(100vh - 54px); background:#FFFFFF; color:#0F172A; border:1.5px solid #CBD5E1; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(15,23,42,0.22); z-index:40; display:flex; flex-direction:column; gap:7px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:5px;">
-          <strong style="font-size:14px; color:#0F172A;">📝 本頁審圖批改記錄</strong>
-          <button id="btn-close-page-rev" style="background:none; border:none; color:#64748B; font-size:15px; cursor:pointer;">✕</button>
-        </div>
-
-        <div style="display:flex; gap:5px; align-items:center;">
-          <select id="new-rev-status" style="padding:4px 7px; border-radius:5px; border:1px solid #CBD5E1; font-size:12px; font-weight:700;">
-            <option value="NEED_FIX">❌ 需改</option>
-            <option value="SITE_CHECK">⚠️ 再核對</option>
-            <option value="NEED_INFO">📌 待補資料</option>
-            <option value="OK">✅ 確認</option>
-          </select>
-          <button id="btn-drawer-cloud-dict" style="margin-left:auto; background:#EFF6FF; border:1px solid #93C5FD; border-radius:5px; padding:3px 8px; font-size:11px; font-weight:700; color:#1D4ED8; cursor:pointer;">⚙️ 管理雲端詞庫</button>
-        </div>
-
-        <textarea id="new-rev-note" rows="2" placeholder="輸入批改要求，或點下方雲端短語一鍵帶入..."
-                  style="width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1.5px solid #93C5FD; font-size:12px; resize:none; font-family:inherit;"></textarea>
-
-        <div id="drawer-phrase-chips" style="display:flex; flex-wrap:wrap; gap:4px; max-height:175px; overflow-y:auto; background:#F8FAFC; padding:5px; border-radius:6px; border:1px solid #E2E8F0;"></div>
-
-        <button id="btn-add-rev-note" style="background:#2563EB; color:#FFF; border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:800; cursor:pointer;">
-          + 新增批改記錄
-        </button>
-
-        <div id="page-rev-items" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:5px; font-size:12px; border-top:1px solid #E2E8F0; padding-top:6px;"></div>
-      </div>
-
-      <div id="sub-module-host" style="flex:1; width:100%; height:100%; position:relative; overflow:hidden; background:#F8FAFC;">
-        <div style="color:#64748B; text-align:center; padding:50px; font-size:14px;">正在按需載入本頁底圖...</div>
-      </div>
-    </div>
-  `;
-
-  const stripToggleBtn = document.getElementById("btn-toggle-space-strip");
-  const stripDrawer = document.getElementById("ed-space-strip-drawer");
-  stripToggleBtn.onclick = async () => {
-    const willOpen = stripDrawer.classList.contains("hidden");
-    stripDrawer.classList.toggle("hidden");
-    stripToggleBtn.textContent = willOpen ? `🗂️ 本區圖集 (${sameSpacePages.length}) ▴` : `🗂️ 本區圖集 (${sameSpacePages.length}) ▾`;
-    if (willOpen) {
-      for (const spPg of sameSpacePages) {
-        const url = await ensureSinglePagePhoto(currentProject, spPg);
-        const box = document.getElementById(`strip-img-${spPg.id}`);
-        if (box) box.innerHTML = url ? `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />` : `無圖`;
-      }
+    if (!phrases.length) {
+      catsEl.innerHTML = "";
+      itemsEl.innerHTML = `<div style="font-size:10px; color:#64748B; padding:3px;">雲端尚未建立短語，點右上「短語庫」新增或匯入範本。</div>`;
+      return;
     }
-  };
-  document.getElementById("btn-close-space-strip").onclick = () => {
-    stripDrawer.classList.add("hidden");
-    stripToggleBtn.textContent = `🗂️ 本區圖集 (${sameSpacePages.length}) ▾`;
-  };
-  stripDrawer.querySelectorAll(".strip-thumb-card").forEach(card => {
-    card.onclick = () => {
-      const targetIdx = Number(card.dataset.jumpIdx);
-      if (targetIdx === activePageIdx) return;
-      saveAndRun(() => { activePageIdx = targetIdx; renderWorkspace(); });
-    };
-  });
 
-  const topArrowBtn = document.getElementById("btn-top-arrow-mode");
-  topArrowBtn.onclick = () => {
-    if (!activeCanvasInstance) return;
-    const nextMode = activeCanvasInstance.mode === "ARROW" ? "VIEW" : "ARROW";
-    activeCanvasInstance.setMode(nextMode);
-  };
+    const cats = ["全部", ...new Set(phrases.map(p => p.cat || "常用"))];
+    catsEl.innerHTML = cats.map(c => `
+      <button type="button" class="mc-pcat-btn" data-pcat="${c}"
+              style="padding:2px 7px; font-size:11px; border-radius:4px; border:1px solid ${this.activePhraseCat === c ? "#2563EB" : "#CBD5E1"}; background:${this.activePhraseCat === c ? "#DBEAFE" : "#FFF"}; color:${this.activePhraseCat === c ? "#1D4ED8" : "#475569"}; font-weight:700; cursor:pointer; white-space:nowrap;">
+        ${c}
+      </button>
+    `).join("");
 
-  document.querySelectorAll(".top-cdot").forEach(dot => {
-    dot.onclick = () => {
-      const col = dot.dataset.tcol;
-      document.querySelectorAll(".top-cdot").forEach(d => {
-        d.style.border = d.dataset.tcol === col ? "2.5px solid #0F172A" : "1px solid #64748B";
-      });
-      if (activeCanvasInstance) activeCanvasInstance.setActiveColor(col);
-    };
-  });
+    catsEl.querySelectorAll(".mc-pcat-btn").forEach(b => {
+      b.onclick = () => { this.activePhraseCat = b.dataset.pcat; this.renderArrowPhraseUI(); };
+    });
 
-  const topStrokeSlider = document.getElementById("top-stroke-slider");
-  const topStrokeVal = document.getElementById("top-stroke-val");
-  topStrokeSlider.oninput = () => {
-    const v = parseFloat(topStrokeSlider.value);
-    topStrokeVal.textContent = String(v);
-    if (activeCanvasInstance) activeCanvasInstance.setStrokeWidth(v);
-  };
-  topStrokeSlider.onchange = () => {
-    if (activeCanvasInstance && activeCanvasInstance.selectedItems.length) activeCanvasInstance.emitSave();
-  };
+    const filtered = this.activePhraseCat === "全部"
+      ? phrases
+      : phrases.filter(p => (p.cat || "常用") === this.activePhraseCat);
 
-  document.getElementById("btn-top-reset-zoom").onclick = () => {
-    if (activeCanvasInstance) activeCanvasInstance.resetZoom();
-  };
-
-  document.getElementById("ed-space-sel").onchange = async (e) => {
-    page.space = e.target.value;
-    page.title = `${page.space} · ${normalizePageCategory(page)}`;
-    await saveCurrentProject();
-    renderSinglePageEditor(page);
-  };
-
-  document.getElementById("ed-cat-sel").onchange = async (e) => {
-    page.docTypeLabel = e.target.value;
-    page.title = `${page.space || "未標空間"} · ${page.docTypeLabel}`;
-    await saveCurrentProject();
-  };
-
-  const renderDrawerPhrases = () => {
-    const box = document.getElementById("drawer-phrase-chips");
-    if (!box) return;
-    box.innerHTML = cloudPhraseBank.slice(0, 24).map(p => `
-      <button type="button" class="drw-phrase-chip" data-ptext="${p.text.replace(/"/g, "&quot;")}"
-              style="background:#FFF; border:1px solid #CBD5E1; border-radius:4px; padding:3px 7px; font-size:11px; color:#334155; cursor:pointer; text-align:left;">
+    itemsEl.innerHTML = filtered.map(p => `
+      <button type="button" class="mc-pitem-btn" data-ptext="${p.text.replace(/"/g, "&quot;")}"
+              style="text-align:left; background:#FFF; border:1px solid #E2E8F0; border-radius:4px; padding:4px 7px; font-size:11px; color:#1E293B; cursor:pointer;">
         ${p.text}
       </button>
-    `).join("") || `<span style="font-size:11px; color:#94A3B8;">雲端尚無短語，點上方「⚙️ 管理雲端詞庫」新增或匯入範本。</span>`;
-    box.querySelectorAll(".drw-phrase-chip").forEach(btn => {
-      btn.onclick = () => {
-        const inp = document.getElementById("new-rev-note");
-        inp.value = inp.value ? `${inp.value} ${btn.dataset.ptext}` : btn.dataset.ptext;
-        inp.focus();
+    `).join("");
+
+    itemsEl.querySelectorAll(".mc-pitem-btn").forEach(b => {
+      b.onclick = () => {
+        const txt = b.dataset.ptext;
+        this.arrowInput.value = this.arrowInput.value ? `${this.arrowInput.value} ${txt}` : txt;
+        this.arrowInput.focus();
       };
     });
-  };
-  renderDrawerPhrases();
+  }
 
-  document.getElementById("btn-drawer-cloud-dict").onclick = () => openCloudDictModal("PHRASE", renderDrawerPhrases);
+  commitArrowEditor(shouldSave = true) {
+    if (!this.pendingArrowAction) return;
+    const val = this.arrowInput.value;
+    const st = this.selectedArrowStatus || "NEED_FIX";
+    const fn = this.pendingArrowAction;
+    this.pendingArrowAction = null;
+    this.arrowBox.classList.add("hidden");
+    if (shouldSave) fn(val, st);
+    this.updateNearToolbar();
+  }
 
-  const renderPageRevItems = () => {
-    const listEl = document.getElementById("page-rev-items");
-    const badgeBtn = document.getElementById("btn-page-review-drawer");
-    if (badgeBtn) badgeBtn.textContent = `📝 記錄 (${page.reviewLogs.length})`;
-    if (!listEl) return;
-    if (!page.reviewLogs.length) {
-      listEl.innerHTML = `<div style="color:#94A3B8; font-size:11px;">尚無批改記錄，可使用頂部「↗ 箭頭批改」拉線打字或在上方輸入。</div>`;
+  commitInline(shouldSave = false) {
+    this.commitRulerEditor(shouldSave);
+    this.commitPlainText(shouldSave);
+    this.commitArrowEditor(shouldSave);
+  }
+
+  getObjectByTypeAndIndex(type, index) {
+    if (type === "line") return this.lines[index];
+    if (type === "marker") return this.markers[index];
+    if (type === "path") return this.paths[index];
+    if (type === "arrow") return this.arrows[index];
+    if (type === "sticker") return this.stickers[index];
+    if (type === "overlay") return this.overlays[index];
+    return null;
+  }
+
+  getObjectAnchorImg(type, obj) {
+    if (type === "marker" || type === "sticker") return { x: obj.x, y: obj.y };
+    if (type === "overlay") return { x: obj.x, y: obj.y + obj.h / 2 };
+    if (type === "arrow") return { x: obj.x2, y: obj.y2 };
+    if (type === "line") return { x: (obj.x1 + obj.x2) / 2, y: (obj.y1 + obj.y2) / 2 };
+    if (type === "path" && obj.points?.length) {
+      const mid = obj.points[Math.floor(obj.points.length / 2)];
+      return { x: mid.x, y: mid.y };
+    }
+    return { x: 0, y: 0 };
+  }
+
+  updateNearToolbar() {
+    if (!this.selectedItems.length || this.isAnyEditorOpen()) {
+      this.nearToolbar.style.display = "none";
       return;
     }
-    listEl.innerHTML = page.reviewLogs.map((r, i) => {
-      const stKey = normalizeReviewStatus(r.status);
-      const meta = REVIEW_STATUS_META[stKey];
-      return `
-        <div style="background:${meta.bg}; border:1px solid ${meta.border}; border-radius:6px; padding:6px 8px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
-          <div style="flex:1;">
-            <div style="font-size:10px; color:#64748B;">${r.time || ""}</div>
-            <div style="color:${meta.text}; font-weight:700; white-space:pre-wrap;">${r.note}</div>
-          </div>
-          <button class="page-rev-cycle" data-ridx="${i}" style="background:${meta.badgeBg}; color:${meta.badgeText}; border:none; border-radius:4px; padding:3px 7px; font-size:10px; font-weight:800; cursor:pointer; white-space:nowrap;">
-            ${meta.label} ↻
-          </button>
-          <button class="page-rev-del" data-ridx="${i}" style="background:none; border:none; color:#64748B; font-size:12px; cursor:pointer;">✕</button>
-        </div>
-      `;
-    }).join("");
 
-    listEl.querySelectorAll(".page-rev-cycle").forEach(b => {
-      b.onclick = async () => {
-        const item = page.reviewLogs[Number(b.dataset.ridx)];
-        if (!item) return;
-        const cur = normalizeReviewStatus(item.status);
-        item.status = STATUS_CYCLE_ORDER[(STATUS_CYCLE_ORDER.indexOf(cur) + 1) % STATUS_CYCLE_ORDER.length];
-        renderPageRevItems();
-        await saveCurrentProject();
-      };
-    });
-    listEl.querySelectorAll(".page-rev-del").forEach(b => {
-      b.onclick = async () => {
-        page.reviewLogs.splice(Number(b.dataset.ridx), 1);
-        renderPageRevItems();
-        await saveCurrentProject();
-      };
-    });
-  };
-  renderPageRevItems();
-
-  document.getElementById("btn-page-review-drawer").onclick = () => document.getElementById("page-review-drawer").classList.toggle("hidden");
-  document.getElementById("btn-close-page-rev").onclick = () => document.getElementById("page-review-drawer").classList.add("hidden");
-  document.getElementById("btn-add-rev-note").onclick = async () => {
-    const inp = document.getElementById("new-rev-note");
-    const st = document.getElementById("new-rev-status").value;
-    const txt = inp.value.trim();
-    if (!txt) return;
-    const now = new Date();
-    const tStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    page.reviewLogs.unshift({ time: tStr, note: txt, status: st });
-    inp.value = "";
-    renderPageRevItems();
-    await saveCurrentProject();
-  };
-
-  const saveAndRun = async (fn) => {
-    if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
-    await saveCurrentProject();
-    fn();
-  };
-
-  document.getElementById("btn-back-grid").onclick = () => {
-    saveAndRun(() => {
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-      activePageIdx = -1;
-      renderWorkspace();
-    });
-  };
-
-  const host = document.getElementById("sub-module-host");
-
-  const showMeasure = () => {
-    if (!page.sitePhotoUrl) {
-      host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px; font-size:15px;">請先點擊右上角「📷 換底圖」拍照，或按「📄 白底」直接開白底草圖。</div>`;
+    const lastSel = this.selectedItems[this.selectedItems.length - 1];
+    const obj = this.getObjectByTypeAndIndex(lastSel.type, lastSel.index);
+    if (!obj) {
+      this.nearToolbar.style.display = "none";
       return;
     }
-    activeCanvasInstance = new MeasureCanvas(
-      host,
-      page.sitePhotoUrl,
-      {
-        lines: page.lines || [],
-        markers: page.markers || [],
-        paths: page.paths || [],
-        arrows: page.arrows || [],
-        stickers: page.stickers || [],
-        overlays: page.overlays || []
-      },
-      finalColors,
-      async (updated) => {
-        page.lines = updated.lines || [];
-        page.markers = updated.markers || [];
-        if (updated.paths) page.paths = updated.paths;
-        if (updated.arrows) page.arrows = updated.arrows;
-        if (updated.stickers) page.stickers = updated.stickers;
-        if (updated.overlays) page.overlays = updated.overlays;
-        if (updated.newReviewNote) {
-          const now = new Date();
-          const tStr = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-          page.reviewLogs.unshift({
-            time: tStr,
-            note: updated.newReviewNote,
-            status: updated.newReviewStatus || "NEED_FIX"
-          });
-          renderPageRevItems();
+
+    const anchor = this.getObjectAnchorImg(lastSel.type, obj);
+    const scr = this.imgToScreen(anchor.x, anchor.y);
+
+    const countEl = this.nearToolbar.querySelector(".mc-near-count");
+    const valEl = this.nearToolbar.querySelector(".mc-near-val");
+    const editBtn = this.nearToolbar.querySelector(".mc-near-edit");
+    const colorsWrap = this.nearToolbar.querySelector(".mc-near-colors-wrap");
+
+    if (this.selectedItems.length > 1) {
+      countEl.textContent = `已選${this.selectedItems.length}項`;
+      countEl.classList.remove("hidden");
+      editBtn.style.display = "none";
+      colorsWrap.style.display = "flex";
+      valEl.textContent = "批量";
+    } else {
+      countEl.classList.add("hidden");
+      if (lastSel.type === "overlay") {
+        valEl.textContent = `${Math.round(obj.w)}w`;
+        editBtn.style.display = "none";
+        colorsWrap.style.display = "none";
+      } else {
+        colorsWrap.style.display = "flex";
+        if (lastSel.type === "marker" || lastSel.type === "sticker" || lastSel.type === "arrow" || lastSel.type === "line") {
+          valEl.textContent = String(obj.fontSize || (lastSel.type === "line" ? 15 : 18));
+          editBtn.style.display = "inline-flex";
+        } else {
+          valEl.textContent = String(obj.strokeWidth || 1.5);
+          editBtn.style.display = "none";
         }
-        await saveCurrentProject();
-      },
-      {
-        hasPrev: activePageIdx > 0,
-        hasNext: activePageIdx < totalPages - 1,
-        getPhraseBank: () => cloudPhraseBank,
-        getStampGroups: () => cloudStampGroups,
-        onBaseImageMerged: async (mergedUrl) => {
-          page.sitePhotoUrl = mergedUrl;
-          memoryPhotoCache.set(page.id, mergedUrl);
-          const refId = page.mediaRefId || `M_${currentProject.id}_${page.id}`;
-          page.mediaRefId = refId;
-          await setDoc(doc(db, MEDIA_COL, String(refId)), {
-            projectId: currentProject.id,
-            pageId: page.id,
-            imageData: mergedUrl,
-            updatedAt: Date.now()
-          });
-          await saveCurrentProject();
-        },
-        onModeSync: (m) => {
-          if (m === "ARROW") {
-            topArrowBtn.style.background = "#DC2626";
-            topArrowBtn.style.color = "#FFFFFF";
-          } else {
-            topArrowBtn.style.background = "#FEF2F2";
-            topArrowBtn.style.color = "#DC2626";
-          }
-        },
-        onOpenDictManager: (tab, cb) => openCloudDictModal(tab, () => {
-          renderDrawerPhrases();
-          if (typeof cb === "function") cb();
-        }),
-        onPrev: () => { if (activePageIdx > 0) saveAndRun(() => { activePageIdx--; renderWorkspace(); }); },
-        onNext: () => { if (activePageIdx < totalPages - 1) saveAndRun(() => { activePageIdx++; renderWorkspace(); }); }
       }
-    );
-  };
+    }
 
-  const whiteBtn = document.getElementById("btn-toggle-white-bg");
-  whiteBtn.onclick = () => {
-    if (!activeCanvasInstance) { page.sitePhotoUrl = createBlankWhiteDataUrl(); showMeasure(); return; }
-    const isWhite = activeCanvasInstance.toggleWhiteBackground();
-    whiteBtn.style.background = isWhite ? "#FEF08A" : "#F8FAFC";
-    whiteBtn.textContent = isWhite ? "🖼️ 還原底圖" : "📄 白底";
-  };
+    this.nearToolbar.style.display = "flex";
+    const barW = 320;
+    const safeX = Number.isFinite(scr.x) ? scr.x : this.viewW / 2;
+    const safeY = Number.isFinite(scr.y) ? scr.y : this.viewH / 2;
+    const left = Math.max(8, Math.min(Math.max(8, this.viewW - barW - 8), safeX - barW / 2));
+    const top = safeY + 74 > this.viewH - 12 ? Math.max(48, safeY - 74) : Math.max(48, safeY + 34);
+    this.nearToolbar.style.left = `${left}px`;
+    this.nearToolbar.style.top = `${top}px`;
+  }
 
-  document.getElementById("up-site-photo").onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px;">正在壓縮並同步底圖至雲端...</div>`;
-    const res = await uploadMediaToCloud(currentProject.id, page.id, file);
-    page.sitePhotoUrl = res.imageData;
-    memoryPhotoCache.set(page.id, res.imageData);
-    await saveCurrentProject();
-    showMeasure();
-  };
+  deleteObjectAt(type, idx) {
+    if (type === "line") this.lines.splice(idx, 1);
+    else if (type === "marker") this.markers.splice(idx, 1);
+    else if (type === "path") this.paths.splice(idx, 1);
+    else if (type === "arrow") this.arrows.splice(idx, 1);
+    else if (type === "sticker") this.stickers.splice(idx, 1);
+    else if (type === "overlay") this.overlays.splice(idx, 1);
+  }
 
-  await ensureSinglePagePhoto(currentProject, page);
-  showMeasure();
+  getPillBoundsImg(ix, iy, text, fontPx = 15, targetScale = this.scale) {
+    const fs = fontPx / targetScale;
+    this.ctx.save();
+    this.ctx.font = `800 ${fs}px sans-serif`;
+    const lines = String(text || "").split("\n");
+    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), 20 / targetScale);
+    this.ctx.restore();
+    const padX = 8 / targetScale;
+    const padY = 5 / targetScale;
+    const lineH = fs * 1.25;
+    const boxW = maxW + padX * 2;
+    const boxH = lines.length * lineH + padY * 2;
+    return { x: ix - boxW / 2, y: iy - boxH / 2, w: boxW, h: boxH };
+  }
+
+  getMarkerBoundsImg(m) {
+    const fs = (m.fontSize || 18) / this.scale;
+    this.ctx.save();
+    this.ctx.font = `800 ${fs}px sans-serif`;
+    const wText = Math.max(this.ctx.measureText(m.text || "").width, 20 / this.scale);
+    this.ctx.restore();
+    const padX = 6 / this.scale;
+    const padY = 4 / this.scale;
+    const w = wText + padX * 2;
+    const h = fs + padY * 2;
+    return { x: m.x - w / 2, y: m.y - h / 2, w, h };
+  }
+
+  hitTest(ix, iy) {
+    const tol = 26 / this.scale;
+    for (let i = this.stickers.length - 1; i >= 0; i--) {
+      const s = this.stickers[i];
+      const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 15);
+      if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
+        return { type: "sticker", index: i };
+      }
+    }
+    for (let i = this.markers.length - 1; i >= 0; i--) {
+      const m = this.markers[i];
+      const b = this.getMarkerBoundsImg(m);
+      if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
+        return { type: "marker", index: i };
+      }
+    }
+    for (let i = this.arrows.length - 1; i >= 0; i--) {
+      const a = this.arrows[i];
+      if (this.distToSegment(ix, iy, a.x1, a.y1, a.x2, a.y2) < tol) return { type: "arrow", index: i };
+      if (a.text) {
+        const b = this.getPillBoundsImg(a.x2, a.y2, a.text, a.fontSize || 16);
+        if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
+          return { type: "arrow", index: i };
+        }
+      }
+    }
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const l = this.lines[i];
+      if (this.distToSegment(ix, iy, l.x1, l.y1, l.x2, l.y2) < tol) return { type: "line", index: i };
+    }
+    for (let i = this.paths.length - 1; i >= 0; i--) {
+      const p = this.paths[i];
+      for (let j = 1; j < p.points.length; j++) {
+        if (this.distToSegment(ix, iy, p.points[j - 1].x, p.points[j - 1].y, p.points[j].x, p.points[j].y) < tol) return { type: "path", index: i };
+      }
+    }
+    for (let i = this.overlays.length - 1; i >= 0; i--) {
+      const ov = this.overlays[i];
+      if (ix >= ov.x - ov.w / 2 && ix <= ov.x + ov.w / 2 && iy >= ov.y - ov.h / 2 && iy <= ov.y + ov.h / 2) {
+        return { type: "overlay", index: i };
+      }
+    }
+    return null;
+  }
+
+  distToSegment(px, py, x1, y1, x2, y2) {
+    const l2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+    if (l2 === 0) return Math.hypot(px - x1, py - y1);
+    let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
+  }
+
+  emitSave(newReviewNote = "", newReviewStatus = "NEED_FIX") {
+    if (typeof this.onChange === "function") {
+      this.onChange({
+        lines: this.lines,
+        markers: this.markers,
+        paths: this.paths,
+        arrows: this.arrows,
+        stickers: this.stickers,
+        overlays: this.overlays,
+        newReviewNote,
+        newReviewStatus
+      });
+    }
+  }
+
+  render() {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, this.viewW, this.viewH);
+    ctx.fillStyle = "#F8FAFC";
+    ctx.fillRect(0, 0, this.viewW, this.viewH);
+
+    ctx.save();
+    ctx.translate(this.offsetX, this.offsetY);
+    ctx.scale(this.scale, this.scale);
+
+    if (this.whiteBg && this.bgImg.naturalWidth) {
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, this.bgImg.naturalWidth, this.bgImg.naturalHeight);
+    } else if (this.bgImg && this.bgImg.complete && this.bgImg.naturalWidth) {
+      ctx.drawImage(this.bgImg, 0, 0);
+    }
+
+    this.overlays.forEach((ov, idx) => {
+      const im = this.getOverlayImageElement(ov.src);
+      if (im && im.complete && im.naturalWidth) {
+        ctx.save();
+        ctx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        const isSel = this.isItemSelected("overlay", idx);
+        ctx.strokeStyle = isSel ? "#FACC15" : "#64748B";
+        ctx.lineWidth = (isSel ? 3 : 1.2) / this.scale;
+        ctx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
+        ctx.restore();
+      }
+    });
+
+    const allPaths = this.draftObj?.type === "path" ? [...this.paths, this.draftObj] : this.paths;
+    allPaths.forEach((p, idx) => {
+      if (!p.points || p.points.length < 2) return;
+      ctx.save();
+      ctx.strokeStyle = p.color || "#DC2626";
+      ctx.lineWidth = (p.strokeWidth || 1.5) / this.scale;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(p.points[0].x, p.points[0].y);
+      for (let i = 1; i < p.points.length; i++) ctx.lineTo(p.points[i].x, p.points[i].y);
+      ctx.stroke();
+      if (this.isItemSelected("path", idx)) {
+        ctx.strokeStyle = "#FACC15";
+        ctx.lineWidth = ((p.strokeWidth || 1.5) + 4) / this.scale;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+
+    const allLines = this.draftObj?.type === "line" ? [...this.lines, this.draftObj] : this.lines;
+    allLines.forEach((l, idx) => {
+      ctx.save();
+      const sw = (l.strokeWidth || 1.8) / this.scale;
+      ctx.strokeStyle = l.color || "#2563EB";
+      ctx.lineWidth = sw;
+      ctx.beginPath();
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x2, l.y2);
+      ctx.stroke();
+
+      const r = 4 / this.scale;
+      ctx.fillStyle = l.color || "#2563EB";
+      ctx.beginPath();
+      ctx.arc(l.x1, l.y1, r, 0, Math.PI * 2);
+      ctx.arc(l.x2, l.y2, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (l.text) {
+        const mx = (l.x1 + l.x2) / 2;
+        const my = (l.y1 + l.y2) / 2;
+        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 15, 0.88, this.scale, false);
+      }
+      if (this.isItemSelected("line", idx)) {
+        ctx.strokeStyle = "#FACC15";
+        ctx.lineWidth = sw + 4 / this.scale;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(l.x1, l.y1);
+        ctx.lineTo(l.x2, l.y2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+
+    const allArrows = this.draftObj?.type === "arrow" ? [...this.arrows, this.draftObj] : this.arrows;
+    allArrows.forEach((a, idx) => {
+      ctx.save();
+      const col = a.color || "#DC2626";
+      const sw = (a.strokeWidth || 1.8) / this.scale;
+      ctx.strokeStyle = col;
+      ctx.fillStyle = col;
+      ctx.lineWidth = sw;
+      ctx.beginPath();
+      ctx.moveTo(a.x1, a.y1);
+      ctx.lineTo(a.x2, a.y2);
+      ctx.stroke();
+
+      const ang = Math.atan2(a.y1 - a.y2, a.x1 - a.x2);
+      const headLen = 12 / this.scale;
+      ctx.beginPath();
+      ctx.moveTo(a.x1, a.y1);
+      ctx.lineTo(a.x1 - headLen * Math.cos(ang - Math.PI / 6), a.y1 - headLen * Math.sin(ang - Math.PI / 6));
+      ctx.lineTo(a.x1 - headLen * Math.cos(ang + Math.PI / 6), a.y1 - headLen * Math.sin(ang + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+
+      const isSel = this.isItemSelected("arrow", idx);
+      if (a.text) {
+        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 16, 0.78, this.scale, isSel);
+      }
+      if (isSel) {
+        ctx.strokeStyle = "#FACC15";
+        ctx.lineWidth = sw + 4 / this.scale;
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(a.x1, a.y1);
+        ctx.lineTo(a.x2, a.y2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+
+    this.markers.forEach((m, idx) => {
+      ctx.save();
+      const b = this.getMarkerBoundsImg(m);
+      const fs = (m.fontSize || 18) / this.scale;
+      ctx.fillStyle = "rgba(255,255,255,0.78)";
+      ctx.beginPath();
+      ctx.roundRect(b.x, b.y, b.w, b.h, 4 / this.scale);
+      ctx.fill();
+
+      ctx.font = `800 ${fs}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = m.color || "#DC2626";
+      ctx.fillText(m.text || "", m.x, m.y);
+
+      if (this.isItemSelected("marker", idx)) {
+        ctx.strokeStyle = "#FACC15";
+        ctx.lineWidth = 2.5 / this.scale;
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+      }
+      ctx.restore();
+    });
+
+    this.stickers.forEach((st, idx) => {
+      ctx.save();
+      const isSel = this.isItemSelected("sticker", idx);
+      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 15, 0.76, this.scale, isSel);
+      ctx.restore();
+    });
+
+    if (this.marqueeRect) {
+      ctx.save();
+      ctx.strokeStyle = "#2563EB";
+      ctx.fillStyle = "rgba(37, 99, 235, 0.12)";
+      ctx.lineWidth = 1.5 / this.scale;
+      ctx.setLineDash([5 / this.scale, 4 / this.scale]);
+      const rx = Math.min(this.marqueeRect.x1, this.marqueeRect.x2);
+      const ry = Math.min(this.marqueeRect.y1, this.marqueeRect.y2);
+      const rw = Math.abs(this.marqueeRect.x2 - this.marqueeRect.x1);
+      const rh = Math.abs(this.marqueeRect.y2 - this.marqueeRect.y1);
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, fontPx = 15, bgAlpha = 0.76, targetScale = this.scale, isSelected = false) {
+    const b = this.getPillBoundsImg(ix, iy, text, fontPx, targetScale);
+    const fs = fontPx / targetScale;
+    const padY = 5 / targetScale;
+    const lineH = fs * 1.25;
+    const lines = String(text || "").split("\n");
+
+    ctx.save();
+    ctx.globalAlpha = bgAlpha;
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.roundRect(b.x, b.y, b.w, b.h, 6 / targetScale);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = isSelected ? "#FACC15" : bg;
+    ctx.lineWidth = (isSelected ? 2.8 : 1.2) / targetScale;
+    ctx.stroke();
+
+    ctx.font = `800 ${fs}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = fg;
+    lines.forEach((ln, i) => {
+      ctx.fillText(ln, ix, b.y + padY + lineH * (i + 0.5));
+    });
+    ctx.restore();
+  }
 }
