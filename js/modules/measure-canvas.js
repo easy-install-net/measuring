@@ -48,8 +48,8 @@ export class MeasureCanvas {
     this.mode = "VIEW";
     this.multiSelectMode = false;
     this.activeColor = this.colors[0] || "#DC2626";
-    this.strokeWidth = 2;
-    this.fontSize = 24;
+    this.strokeWidth = 1.5;
+    this.fontSize = 16;
     this.whiteBg = false;
     this.selectedItems = [];
     this.undoStack = [];
@@ -90,7 +90,7 @@ export class MeasureCanvas {
     this.bgImg.crossOrigin = "anonymous";
     this.bgImg.onload = () => {
       this.fitImageToScreen();
-      this.migrateLegacyScreenSpaceFonts();
+      this.normalizeFontsToFixedScreenPx();
       this.scheduleRender();
     };
     this.bgImg.src = imageUrl;
@@ -99,30 +99,22 @@ export class MeasureCanvas {
     this.bindEvents();
   }
 
-  // 將舊版未轉換的螢幕像素字級自動換算為底圖空間字級，確保放大縮小時等比隨動
-  migrateLegacyScreenSpaceFonts() {
+  // 確保所有文字字級維持標準螢幕固定像素（不會隨畫面縮放變大變小）
+  normalizeFontsToFixedScreenPx() {
     const baseFit = Math.max(0.15, this.fitScale || 1);
-    const convertObj = (obj, fallbackScreenPx) => {
-      if (!obj || obj._imgSpaceFont) return;
-      const raw = obj.fontSize || fallbackScreenPx;
-      obj.fontSize = Math.round(raw / baseFit);
-      obj._imgSpaceFont = true;
+    const fixObj = (obj, defaultPx) => {
+      if (!obj) return;
+      if (obj._imgSpaceFont) {
+        obj.fontSize = Math.max(12, Math.min(48, Math.round((obj.fontSize || defaultPx) * baseFit)));
+        delete obj._imgSpaceFont;
+      } else if (!obj.fontSize || obj.fontSize > 60) {
+        obj.fontSize = defaultPx;
+      }
     };
-    this.markers.forEach(m => convertObj(m, 18));
-    this.stickers.forEach(s => convertObj(s, 15));
-    this.arrows.forEach(a => convertObj(a, 16));
-    this.lines.forEach(l => convertObj(l, 15));
-  }
-
-  // 根據當前底圖解析度取得標準字級（直接綁定底圖座標系，隨底圖等比例放大縮小）
-  getImageSpaceFontSize(baseScreenPx = 18) {
-    const baseFit = Math.max(0.15, this.fitScale || 1);
-    return Math.max(14, Math.round(baseScreenPx / baseFit));
-  }
-
-  getImageSpaceStrokeWidth(baseScreenSw = 2) {
-    const baseFit = Math.max(0.15, this.fitScale || 1);
-    return Math.max(1.5, Number((baseScreenSw / baseFit).toFixed(2)));
+    this.markers.forEach(m => fixObj(m, 16));
+    this.stickers.forEach(s => fixObj(s, 14));
+    this.arrows.forEach(a => fixObj(a, 15));
+    this.lines.forEach(l => fixObj(l, 15));
   }
 
   scheduleRender() {
@@ -214,6 +206,8 @@ export class MeasureCanvas {
       octx.drawImage(this.bgImg, 0, 0, baseW, baseH);
     }
 
+    const renderScale = Math.max(0.2, this.scale || 1);
+
     for (const targetItem of this.selectedItems) {
       const { type, index } = targetItem;
       const obj = this.getObjectByTypeAndIndex(type, index);
@@ -230,17 +224,17 @@ export class MeasureCanvas {
           octx.restore();
         }
       } else if (type === "marker") {
-        const fs = obj.fontSize || 28;
+        const fs = (obj.fontSize || 16) / renderScale;
         octx.save();
         octx.font = `800 ${fs}px sans-serif`;
-        const wText = Math.max(octx.measureText(obj.text || "").width, fs * 1.1);
-        const padX = fs * 0.35;
-        const padY = fs * 0.24;
+        const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
+        const padX = 6 / renderScale;
+        const padY = 4 / renderScale;
         const w = wText + padX * 2;
         const h = fs + padY * 2;
         octx.fillStyle = "rgba(255,255,255,0.82)";
         octx.beginPath();
-        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, fs * 0.24);
+        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
         octx.fill();
         octx.textAlign = "center";
         octx.textBaseline = "middle";
@@ -248,10 +242,10 @@ export class MeasureCanvas {
         octx.fillText(obj.text || "", obj.x, obj.y);
         octx.restore();
       } else if (type === "sticker") {
-        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 24, 0.8);
+        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 14, 0.78, renderScale);
       } else if (type === "line") {
         octx.save();
-        const sw = obj.strokeWidth || 3;
+        const sw = (obj.strokeWidth || 1.6) / renderScale;
         octx.strokeStyle = obj.color || "#2563EB";
         octx.lineWidth = sw;
         octx.beginPath();
@@ -259,13 +253,13 @@ export class MeasureCanvas {
         octx.lineTo(obj.x2, obj.y2);
         octx.stroke();
         if (obj.text) {
-          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 24, 0.9);
+          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 15, 0.9, renderScale);
         }
         octx.restore();
       } else if (type === "arrow") {
         octx.save();
         const col = obj.color || "#DC2626";
-        const sw = obj.strokeWidth || 3;
+        const sw = (obj.strokeWidth || 1.6) / renderScale;
         octx.strokeStyle = col;
         octx.fillStyle = col;
         octx.lineWidth = sw;
@@ -274,7 +268,7 @@ export class MeasureCanvas {
         octx.lineTo(obj.x2, obj.y2);
         octx.stroke();
         const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
-        const headLen = Math.max(18, sw * 5);
+        const headLen = 11 / renderScale;
         octx.beginPath();
         octx.moveTo(obj.x1, obj.y1);
         octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
@@ -282,13 +276,13 @@ export class MeasureCanvas {
         octx.closePath();
         octx.fill();
         if (obj.text) {
-          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 26, 0.82);
+          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 15, 0.8, renderScale);
         }
         octx.restore();
       } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
         octx.save();
         octx.strokeStyle = obj.color || "#DC2626";
-        octx.lineWidth = obj.strokeWidth || 3;
+        octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
         octx.lineCap = "round";
         octx.lineJoin = "round";
         octx.beginPath();
@@ -415,12 +409,11 @@ export class MeasureCanvas {
 
   setStrokeWidth(val) {
     this.strokeWidth = val;
-    const imgSw = this.getImageSpaceStrokeWidth(val);
     if (this.selectedItems.length) {
       this.selectedItems.forEach(it => {
         const obj = this.getObjectByTypeAndIndex(it.type, it.index);
         if (obj && (it.type === "path" || it.type === "line" || it.type === "arrow")) {
-          obj.strokeWidth = imgSw;
+          obj.strokeWidth = val;
         }
       });
       this.scheduleRender();
@@ -472,7 +465,7 @@ export class MeasureCanvas {
       <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none; -webkit-user-select:none;">
         <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC; touch-action:none;"></canvas>
 
-        <!-- 精簡合併工具列：直接並排「單選」「多選」 -->
+        <!-- 精簡合併工具列 -->
         <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
           <button class="mc-tool-btn" data-mode="RULER">拉尺</button>
           <button class="mc-tool-btn" data-mode="PEN">畫筆</button>
@@ -490,12 +483,12 @@ export class MeasureCanvas {
 
         <input type="file" class="mc-overlay-file-input hidden" accept="image/*" />
 
-        <!-- 選中物件的小工具條（支援單選與多選批量操作） -->
+        <!-- 選中物件的小工具條（支援手動調字級大小、顏色、改字、合併、刪除） -->
         <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:35; white-space:nowrap;">
           <span class="mc-near-count hidden" style="background:#2563EB; color:#FFF; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;">已選2項</span>
-          <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
-          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">24</span>
-          <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
+          <button type="button" class="mc-near-dec" title="縮小字體 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
+          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">16</span>
+          <button type="button" class="mc-near-inc" title="放大字體 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
 
           <div class="mc-near-colors-wrap" style="display:flex; align-items:center; gap:3px; padding-left:4px; border-left:1px solid #475569;">
             ${quickColors.map(c => `
@@ -628,7 +621,6 @@ export class MeasureCanvas {
   resizeCanvas() {
     if (!this.canvas || !this.rootEl) return;
     const rect = this.rootEl.getBoundingClientRect();
-    // 限制最高 DPR 為 1.5，在 iPad Retina 螢幕上兼顧銳利度與 60fps 順滑縮放
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     this.canvas.width = Math.max(1, rect.width * dpr);
     this.canvas.height = Math.max(1, rect.height * dpr);
@@ -714,14 +706,11 @@ export class MeasureCanvas {
           obj.w = Math.max(40, obj.w * factor);
           obj.h = Math.max(40, obj.h * factor);
         } else if (it.type === "marker" || it.type === "sticker" || it.type === "arrow" || it.type === "line") {
-          const cur = obj.fontSize || this.getImageSpaceFontSize(18);
-          const step = Math.max(3, Math.round(cur * 0.14));
-          obj.fontSize = Math.min(260, Math.max(12, cur + (delta > 0 ? step : -step)));
-          obj._imgSpaceFont = true;
+          const cur = obj.fontSize || 16;
+          obj.fontSize = Math.min(54, Math.max(10, cur + delta));
+          this.fontSize = obj.fontSize;
         } else {
-          const curSw = obj.strokeWidth || this.getImageSpaceStrokeWidth(2);
-          const stepSw = Math.max(0.5, Number((curSw * 0.18).toFixed(1)));
-          obj.strokeWidth = Math.min(40, Math.max(1, Number((curSw + (delta > 0 ? stepSw : -stepSw)).toFixed(1))));
+          obj.strokeWidth = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
         }
       });
       this.updateNearToolbar();
@@ -896,7 +885,6 @@ export class MeasureCanvas {
       this.zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
     }, { passive: false });
 
-    // 防止 iOS Safari 雙指手勢觸發原生頁面縮放
     this.canvas.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
     this.canvas.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
     this.canvas.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
@@ -905,7 +893,6 @@ export class MeasureCanvas {
     this.canvas.addEventListener("touchstart", (e) => {
       if (e.touches.length >= 2) {
         e.preventDefault();
-        // 取消任何進行中的單指草稿，避免多畫出廢線
         this.isDrawing = false;
         this.draftObj = null;
         this.marqueeRect = null;
@@ -947,7 +934,6 @@ export class MeasureCanvas {
           if (dMove > 8 || dZoom > 8) this.twoFingerMoved = true;
         }
 
-        // Procreate 核心公式：同時計算縮放比例與雙指中點位移，讓手指按住的圖紙點永遠鎖在兩指正中間
         const nextScale = Math.min(10, Math.max(0.18, this.twoFingerStartScale * (dist / this.twoFingerStartDist)));
         this.scale = nextScale;
         this.offsetX = cx - this.twoFingerStartImgMid.x * nextScale;
@@ -960,14 +946,12 @@ export class MeasureCanvas {
 
     this.canvas.addEventListener("touchend", (e) => {
       if (this.isTwoFingerGesture && e.touches.length < 2) {
-        // 偵測 Procreate 雙指輕點（Two-finger tap = 復原上一步 Undo）
         const elapsed = Date.now() - this.twoFingerTapStartTime;
         if (!this.twoFingerMoved && elapsed < 280) {
           this.undo();
         }
         this.isTwoFingerGesture = false;
       }
-      // 必須等全部手指完全離開螢幕，才解除防誤觸鎖
       if (e.touches.length === 0) {
         this.touchLiftGuard = false;
         this.isTwoFingerGesture = false;
@@ -1102,7 +1086,7 @@ export class MeasureCanvas {
     }
 
     if (this.mode === "TEXT") {
-      const imgFs = this.getImageSpaceFontSize(18);
+      const fixedFs = this.fontSize || 16;
       this.openPlainTextEditor(sx, sy, "", (txt) => {
         if (!txt.trim()) {
           this.setMode("VIEW");
@@ -1114,8 +1098,7 @@ export class MeasureCanvas {
           x: pt.x, y: pt.y,
           text: txt.trim(),
           color: this.activeColor,
-          fontSize: imgFs,
-          _imgSpaceFont: true
+          fontSize: fixedFs
         });
         this.setSingleSelection({ type: "marker", index: this.markers.length - 1 });
         this.setMode("VIEW");
@@ -1132,9 +1115,8 @@ export class MeasureCanvas {
         type: "arrow",
         x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
         color: this.activeColor,
-        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth),
-        fontSize: this.getImageSpaceFontSize(16),
-        _imgSpaceFont: true,
+        strokeWidth: this.strokeWidth,
+        fontSize: 15,
         text: "",
         status: "NEED_FIX"
       };
@@ -1147,9 +1129,8 @@ export class MeasureCanvas {
         type: "line",
         x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
         color: this.activeColor,
-        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth),
-        fontSize: this.getImageSpaceFontSize(15),
-        _imgSpaceFont: true,
+        strokeWidth: this.strokeWidth,
+        fontSize: 15,
         text: ""
       };
       return;
@@ -1161,7 +1142,7 @@ export class MeasureCanvas {
         type: "path",
         points: [{ x: pt.x, y: pt.y }],
         color: this.activeColor,
-        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth)
+        strokeWidth: this.strokeWidth
       };
     }
   }
@@ -1652,10 +1633,10 @@ export class MeasureCanvas {
       } else {
         colorsWrap.style.display = "flex";
         if (lastSel.type === "marker" || lastSel.type === "sticker" || lastSel.type === "arrow" || lastSel.type === "line") {
-          valEl.textContent = String(Math.round(obj.fontSize || 24));
+          valEl.textContent = String(obj.fontSize || (lastSel.type === "line" ? 15 : 16));
           editBtn.style.display = "inline-flex";
         } else {
-          valEl.textContent = String(obj.strokeWidth || 2);
+          valEl.textContent = String(obj.strokeWidth || 1.5);
           editBtn.style.display = "none";
         }
       }
@@ -1680,16 +1661,16 @@ export class MeasureCanvas {
     else if (type === "overlay") this.overlays.splice(idx, 1);
   }
 
-  // 直接以底圖座標系計算文字標籤邊界，確保放大縮小時嚴格跟隨底圖等比縮放
-  getPillBoundsImg(ix, iy, text, imgFontPx = 24) {
-    const fs = imgFontPx;
+  // 固定螢幕字級邊界計算：除以 this.scale 抵消畫布縮放，保證字體大小始終不隨縮放改變
+  getPillBoundsImg(ix, iy, text, fontPx = 15, targetScale = this.scale) {
+    const fs = fontPx / targetScale;
     this.ctx.save();
     this.ctx.font = `800 ${fs}px sans-serif`;
     const lines = String(text || "").split("\n");
-    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), fs * 1.1);
+    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), 20 / targetScale);
     this.ctx.restore();
-    const padX = fs * 0.45;
-    const padY = fs * 0.28;
+    const padX = 7 / targetScale;
+    const padY = 4 / targetScale;
     const lineH = fs * 1.25;
     const boxW = maxW + padX * 2;
     const boxH = lines.length * lineH + padY * 2;
@@ -1697,13 +1678,13 @@ export class MeasureCanvas {
   }
 
   getMarkerBoundsImg(m) {
-    const fs = m.fontSize || 28;
+    const fs = (m.fontSize || 16) / this.scale;
     this.ctx.save();
     this.ctx.font = `800 ${fs}px sans-serif`;
-    const wText = Math.max(this.ctx.measureText(m.text || "").width, fs * 1.1);
+    const wText = Math.max(this.ctx.measureText(m.text || "").width, 20 / this.scale);
     this.ctx.restore();
-    const padX = fs * 0.35;
-    const padY = fs * 0.24;
+    const padX = 6 / this.scale;
+    const padY = 4 / this.scale;
     const w = wText + padX * 2;
     const h = fs + padY * 2;
     return { x: m.x - w / 2, y: m.y - h / 2, w, h };
@@ -1713,7 +1694,7 @@ export class MeasureCanvas {
     const tol = 26 / this.scale;
     for (let i = this.stickers.length - 1; i >= 0; i--) {
       const s = this.stickers[i];
-      const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 24);
+      const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 14);
       if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
         return { type: "sticker", index: i };
       }
@@ -1729,7 +1710,7 @@ export class MeasureCanvas {
       const a = this.arrows[i];
       if (this.distToSegment(ix, iy, a.x1, a.y1, a.x2, a.y2) < tol) return { type: "arrow", index: i };
       if (a.text) {
-        const b = this.getPillBoundsImg(a.x2, a.y2, a.text, a.fontSize || 26);
+        const b = this.getPillBoundsImg(a.x2, a.y2, a.text, a.fontSize || 15);
         if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
           return { type: "arrow", index: i };
         }
@@ -1739,7 +1720,7 @@ export class MeasureCanvas {
       const l = this.lines[i];
       if (this.distToSegment(ix, iy, l.x1, l.y1, l.x2, l.y2) < tol) return { type: "line", index: i };
       if (l.text) {
-        const b = this.getPillBoundsImg((l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2, l.text, l.fontSize || 24);
+        const b = this.getPillBoundsImg((l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2, l.text, l.fontSize || 15);
         if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
           return { type: "line", index: i };
         }
@@ -1808,7 +1789,7 @@ export class MeasureCanvas {
         ctx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
         const isSel = this.isItemSelected("overlay", idx);
         ctx.strokeStyle = isSel ? "#FACC15" : "#64748B";
-        ctx.lineWidth = isSel ? Math.max(4, 3 / this.scale) : Math.max(1.5, 1.2 / this.scale);
+        ctx.lineWidth = (isSel ? 3 : 1.2) / this.scale;
         ctx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
         ctx.restore();
       }
@@ -1818,9 +1799,8 @@ export class MeasureCanvas {
     allPaths.forEach((p, idx) => {
       if (!p.points || p.points.length < 2) return;
       ctx.save();
-      const sw = p.strokeWidth || 3;
       ctx.strokeStyle = p.color || "#DC2626";
-      ctx.lineWidth = sw;
+      ctx.lineWidth = (p.strokeWidth || 1.5) / this.scale;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.beginPath();
@@ -1829,7 +1809,7 @@ export class MeasureCanvas {
       ctx.stroke();
       if (this.isItemSelected("path", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = sw + 5 / this.scale;
+        ctx.lineWidth = ((p.strokeWidth || 1.5) + 4) / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.stroke();
       }
@@ -1839,7 +1819,7 @@ export class MeasureCanvas {
     const allLines = this.draftObj?.type === "line" ? [...this.lines, this.draftObj] : this.lines;
     allLines.forEach((l, idx) => {
       ctx.save();
-      const sw = l.strokeWidth || 3;
+      const sw = (l.strokeWidth || 1.6) / this.scale;
       ctx.strokeStyle = l.color || "#2563EB";
       ctx.lineWidth = sw;
       ctx.beginPath();
@@ -1847,7 +1827,7 @@ export class MeasureCanvas {
       ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
 
-      const r = Math.max(4, sw * 1.4);
+      const r = 3.5 / this.scale;
       ctx.fillStyle = l.color || "#2563EB";
       ctx.beginPath();
       ctx.arc(l.x1, l.y1, r, 0, Math.PI * 2);
@@ -1857,11 +1837,11 @@ export class MeasureCanvas {
       if (l.text) {
         const mx = (l.x1 + l.x2) / 2;
         const my = (l.y1 + l.y2) / 2;
-        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 24, 0.88, false);
+        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 15, 0.88, this.scale, false);
       }
       if (this.isItemSelected("line", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = sw + 5 / this.scale;
+        ctx.lineWidth = sw + 4 / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
         ctx.moveTo(l.x1, l.y1);
@@ -1875,7 +1855,7 @@ export class MeasureCanvas {
     allArrows.forEach((a, idx) => {
       ctx.save();
       const col = a.color || "#DC2626";
-      const sw = a.strokeWidth || 3;
+      const sw = (a.strokeWidth || 1.6) / this.scale;
       ctx.strokeStyle = col;
       ctx.fillStyle = col;
       ctx.lineWidth = sw;
@@ -1885,7 +1865,7 @@ export class MeasureCanvas {
       ctx.stroke();
 
       const ang = Math.atan2(a.y1 - a.y2, a.x1 - a.x2);
-      const headLen = Math.max(16, sw * 4.5);
+      const headLen = 11 / this.scale;
       ctx.beginPath();
       ctx.moveTo(a.x1, a.y1);
       ctx.lineTo(a.x1 - headLen * Math.cos(ang - Math.PI / 6), a.y1 - headLen * Math.sin(ang - Math.PI / 6));
@@ -1895,11 +1875,11 @@ export class MeasureCanvas {
 
       const isSel = this.isItemSelected("arrow", idx);
       if (a.text) {
-        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 26, 0.8, isSel);
+        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 15, 0.78, this.scale, isSel);
       }
       if (isSel) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = sw + 5 / this.scale;
+        ctx.lineWidth = sw + 4 / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
         ctx.moveTo(a.x1, a.y1);
@@ -1912,10 +1892,10 @@ export class MeasureCanvas {
     this.markers.forEach((m, idx) => {
       ctx.save();
       const b = this.getMarkerBoundsImg(m);
-      const fs = m.fontSize || 28;
+      const fs = (m.fontSize || 16) / this.scale;
       ctx.fillStyle = "rgba(255,255,255,0.78)";
       ctx.beginPath();
-      ctx.roundRect(b.x, b.y, b.w, b.h, fs * 0.24);
+      ctx.roundRect(b.x, b.y, b.w, b.h, 4 / this.scale);
       ctx.fill();
 
       ctx.font = `800 ${fs}px sans-serif`;
@@ -1926,7 +1906,7 @@ export class MeasureCanvas {
 
       if (this.isItemSelected("marker", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = 3 / this.scale;
+        ctx.lineWidth = 2.5 / this.scale;
         ctx.strokeRect(b.x, b.y, b.w, b.h);
       }
       ctx.restore();
@@ -1935,7 +1915,7 @@ export class MeasureCanvas {
     this.stickers.forEach((st, idx) => {
       ctx.save();
       const isSel = this.isItemSelected("sticker", idx);
-      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 24, 0.78, isSel);
+      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 14, 0.76, this.scale, isSel);
       ctx.restore();
     });
 
@@ -1957,11 +1937,10 @@ export class MeasureCanvas {
     ctx.restore();
   }
 
-  // 直接在底圖座標系繪製字體與標籤底框，保證放大縮小時字體完全跟隨圖紙比例縮放
-  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, imgFontPx = 24, bgAlpha = 0.8, isSelected = false) {
-    const b = this.getPillBoundsImg(ix, iy, text, imgFontPx);
-    const fs = imgFontPx;
-    const padY = fs * 0.28;
+  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, fontPx = 15, bgAlpha = 0.76, targetScale = this.scale, isSelected = false) {
+    const b = this.getPillBoundsImg(ix, iy, text, fontPx, targetScale);
+    const fs = fontPx / targetScale;
+    const padY = 4 / targetScale;
     const lineH = fs * 1.25;
     const lines = String(text || "").split("\n");
 
@@ -1969,12 +1948,12 @@ export class MeasureCanvas {
     ctx.globalAlpha = bgAlpha;
     ctx.fillStyle = bg;
     ctx.beginPath();
-    ctx.roundRect(b.x, b.y, b.w, b.h, fs * 0.28);
+    ctx.roundRect(b.x, b.y, b.w, b.h, 5 / targetScale);
     ctx.fill();
 
     ctx.globalAlpha = 1;
     ctx.strokeStyle = isSelected ? "#FACC15" : bg;
-    ctx.lineWidth = isSelected ? Math.max(3, 2.8 / this.scale) : Math.max(1.5, 1.2 / this.scale);
+    ctx.lineWidth = (isSelected ? 2.5 : 1.2) / targetScale;
     ctx.stroke();
 
     ctx.font = `800 ${fs}px sans-serif`;
