@@ -198,3 +198,16 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
 
   renderView();
 }
+export async function renderPublicShareReportView(container, token) {
+  container.innerHTML = `<div class="card" style="text-align:center; padding:40px; font-size:15px;">正在載入現場度尺與審圖報告...</div>`;
+  try {
+    const snap = await getDoc(doc(db, REPORT_COL, String(token)));
+    if (!snap.exists()) {
+      container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626; font-weight:700;">找不到此報告連結或連結已過期。</div>`;
+      return;
+    }
+    renderFormattedReportSheetView(container, snap.data(), null);
+  } catch (err) {
+    container.innerHTML = `<div class="card" style="text-align:center; padding:40px; color:#DC2626;">載入報告失敗：${err?.message || err}</div>`;
+  }
+}
