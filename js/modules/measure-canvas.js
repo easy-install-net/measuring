@@ -30,6 +30,20 @@ function normalizeColorList(rawColors) {
   return parsed.length ? parsed : FALLBACK_COLORS;
 }
 
+function parseNumericMeasure(str) {
+  const s = String(str || "").trim();
+  if (!s) return NaN;
+  const mMatch = s.match(/(-?\d+(?:\.\d+)?)\s*m(?![a-zA-Z])/i);
+  if (mMatch) return parseFloat(mMatch[1]) * 1000;
+  const numMatch = s.match(/-?\d+(?:\.\d+)?/);
+  return numMatch ? parseFloat(numMatch[0]) : NaN;
+}
+
+function formatCleanNum(n) {
+  if (!Number.isFinite(n)) return "0";
+  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(1)));
+}
+
 export class MeasureCanvas {
   constructor(container, imageUrl, initialData, colors, onChange, navOpts = {}) {
     this.container = container;
@@ -53,6 +67,10 @@ export class MeasureCanvas {
     this.whiteBg = false;
     this.selectedItems = [];
     this.undoStack = [];
+
+    // 連續尺狀態（支援 ADD 累加模式 / SUB 減數模式）
+    this.chainModeType = "SUB"; // "SUB" 減數尺 | "ADD" 累加尺
+    this.activeChain = null; // { id, type: "ADD"|"SUB", total: number|null, lastPt: {x,y} }
 
     this.scale = 1;
     this.fitScale = 1;
@@ -99,7 +117,6 @@ export class MeasureCanvas {
     this.bindEvents();
   }
 
-  // 確保所有文字字級維持標準螢幕固定像素（不會隨畫面縮放變大變小）
   normalizeFontsToFixedScreenPx() {
     const baseFit = Math.max(0.15, this.fitScale || 1);
     const fixObj = (obj, defaultPx) => {
@@ -186,6 +203,97 @@ export class MeasureCanvas {
       this.scheduleRender();
     };
     img.src = dataUrl;
+  }
+
+  // 重新計算指定連續尺群組的「累計總數」或「扣減剩餘數」，並自動更新標籤
+  recalculateChainGroup(chainId) {
+    if (!chainId) return;
+    const segs = this.lines.filter(l => l.chainId === chainId);
+    if (!segs.length) return;
+    const cType = segs[0].chainType || "ADD";
+    const totalBase = Number(segs[0].chainTotal);
+
+    let runningSum = 0;
+    let remaining = Number.isFinite(totalBase) ? totalBase : 0;
+
+    segs.forEach((seg, idx) => {
+      const val = parseNumericMeasure(seg.rawText || seg.text || "");
+      const numVal = Number.isFinite(val) ? val : 0;
+      const baseLabel = (seg.rawText || seg.text || "").trim();
+
+      if (cType === "SUB") {
+        if (seg.isRemainderSeg) {
+          seg.rawText = formatCleanNum(remaining);
+          seg.text = `剩 ${formatCleanNum(remaining)}`;
+          remaining = 0;
+        } else {
+          remaining = remaining - numVal;
+          if (idx === 0 && segs.length === 1 && seg.isBaseTotalLine) {
+            seg.text = `總 ${formatCleanNum(totalBase)} (剩 ${formatCleanNum(totalBase)})`;
+          } else {
+            seg.text = baseLabel ? `${baseLabel} (剩${formatCleanNum(remaining)})` : `剩${formatCleanNum(remaining)}`;
+          }
+        }
+      } else {
+        runningSum += numVal;
+        seg.text = baseLabel ? `${baseLabel} (累${formatCleanNum(runningSum)})` : `累${formatCleanNum(runningSum)}`;
+      }
+    });
+  }
+
+  getActiveChainSummary() {
+    if (!this.activeChain) return null;
+    const segs = this.lines.filter(l => l.chainId === this.activeChain.id);
+    if (this.activeChain.type === "SUB") {
+      const total = Number(this.activeChain.total) || 0;
+      const used = segs
+        .filter(s => !s.isBaseTotalLine)
+        .reduce((acc, s) => {
+          const v = parseNumericMeasure(s.rawText || s.text || "");
+          return acc + (Number.isFinite(v) ? v : 0);
+        }, 0);
+      return { type: "SUB", total, used, remaining: total - used, segCount: segs.length };
+    } else {
+      const sum = segs.reduce((acc, s) => {
+        const v = parseNumericMeasure(s.rawText || s.text || "");
+        return acc + (Number.isFinite(v) ? v : 0);
+      }, 0);
+      return { type: "ADD", sum, segCount: segs.length };
+    }
+  }
+
+  updateChainStatusBar() {
+    if (!this.chainHudBar) return;
+    if (this.mode !== "CHAIN_RULER") {
+      this.chainHudBar.classList.add("hidden");
+      return;
+    }
+    this.chainHudBar.classList.remove("hidden");
+    const addBtn = this.chainHudBar.querySelector("#mc-chain-type-add");
+    const subBtn = this.chainHudBar.querySelector("#mc-chain-type-sub");
+    const infoEl = this.chainHudBar.querySelector("#mc-chain-info-text");
+    const finishBtn = this.chainHudBar.querySelector("#mc-chain-finish-btn");
+
+    const curType = this.activeChain ? this.activeChain.type : this.chainModeType;
+    addBtn.style.background = curType === "ADD" ? "#2563EB" : "#F1F5F9";
+    addBtn.style.color = curType === "ADD" ? "#FFF" : "#334155";
+    subBtn.style.background = curType === "SUB" ? "#DC2626" : "#F1F5F9";
+    subBtn.style.color = curType === "SUB" ? "#FFF" : "#334155";
+
+    if (!this.activeChain) {
+      finishBtn.classList.add("hidden");
+      infoEl.textContent = curType === "SUB"
+        ? "➖ 減數連續尺：先在圖紙拉第一條線設定總長"
+        : "➕ 累加連續尺：在圖紙拉第一段線開始累加";
+    } else {
+      finishBtn.classList.remove("hidden");
+      const summary = this.getActiveChainSummary();
+      if (summary.type === "SUB") {
+        infoEl.innerHTML = `總長 <strong>${formatCleanNum(summary.total)}</strong> ｜ 已用 ${formatCleanNum(summary.used)} ｜ <span style="color:#DC2626; font-weight:900;">剩餘 ${formatCleanNum(summary.remaining)}</span>（點線上分割或拉下一段）`;
+      } else {
+        infoEl.innerHTML = `已量 ${summary.segCount} 段 ｜ <span style="color:#1D4ED8; font-weight:900;">累計總計：${formatCleanNum(summary.sum)}</span>（繼續拉下一段）`;
+      }
+    }
   }
 
   async flattenSelectedItemsIntoBase() {
@@ -344,6 +452,17 @@ export class MeasureCanvas {
         await this.navOpts.onBaseImageMerged(prev.imageUrl);
       }
     }
+    if (this.activeChain) {
+      const remainSegs = this.lines.filter(l => l.chainId === this.activeChain.id);
+      if (!remainSegs.length) {
+        this.activeChain = null;
+      } else {
+        const lastSeg = remainSegs[remainSegs.length - 1];
+        this.activeChain.lastPt = { x: lastSeg.x2, y: lastSeg.y2 };
+        this.recalculateChainGroup(this.activeChain.id);
+      }
+      this.updateChainStatusBar();
+    }
     this.selectedItems = [];
     this.updateNearToolbar();
     this.updateUndoButtonState();
@@ -359,6 +478,10 @@ export class MeasureCanvas {
   }
 
   setMode(newMode) {
+    if (newMode !== "CHAIN_RULER") {
+      this.activeChain = null;
+    }
+
     if (newMode === "SELECT_SINGLE") {
       this.mode = "SELECT";
       this.multiSelectMode = false;
@@ -385,6 +508,7 @@ export class MeasureCanvas {
     if (this.mode !== "SELECT" && this.mode !== "VIEW") {
       this.selectedItems = [];
     }
+    this.updateChainStatusBar();
     this.updateNearToolbar();
     this.scheduleRender();
   }
@@ -465,9 +589,10 @@ export class MeasureCanvas {
       <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none; -webkit-user-select:none;">
         <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC; touch-action:none;"></canvas>
 
-        <!-- 精簡合併工具列 -->
+        <!-- 頂部主工具列：加入「連續尺」模式 -->
         <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
           <button class="mc-tool-btn" data-mode="RULER">拉尺</button>
+          <button class="mc-tool-btn" data-mode="CHAIN_RULER" style="font-weight:800;">連續尺</button>
           <button class="mc-tool-btn" data-mode="PEN">畫筆</button>
           <button class="mc-tool-btn" data-mode="TEXT">文字</button>
           <button type="button" class="mc-overlay-pick-btn" style="background:transparent; border:1px solid transparent; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:700; color:#334155; cursor:pointer; white-space:nowrap;">貼圖</button>
@@ -481,9 +606,19 @@ export class MeasureCanvas {
           <button class="mc-tool-btn" data-mode="ERASER">擦除</button>
         </div>
 
+        <!-- 連續尺即時狀態列（切換 ➕累加 / ➖減數、查看總數或剩餘數、一鍵結束本組） -->
+        <div class="mc-chain-hud hidden" style="position:absolute; top:46px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:5px 10px; background:rgba(255,255,255,0.97); border:1.5px solid #93C5FD; border-radius:10px; box-shadow:0 6px 16px rgba(15,23,42,0.12); z-index:22; max-width:95vw; font-size:12px;">
+          <div style="display:inline-flex; border:1px solid #CBD5E1; border-radius:6px; overflow:hidden;">
+            <button type="button" id="mc-chain-type-sub" style="border:none; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer; background:#DC2626; color:#FFF;">➖ 減數尺</button>
+            <button type="button" id="mc-chain-type-add" style="border:none; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer; background:#F1F5F9; color:#334155;">➕ 累加尺</button>
+          </div>
+          <span id="mc-chain-info-text" style="color:#0F172A; font-weight:700;">➖ 減數連續尺：先在圖紙拉第一條線設定總長</span>
+          <button type="button" id="mc-chain-finish-btn" class="hidden" style="background:#0F172A; color:#FFF; border:none; border-radius:5px; padding:3px 9px; font-size:11px; font-weight:800; cursor:pointer;">🏁 結束本組</button>
+        </div>
+
         <input type="file" class="mc-overlay-file-input hidden" accept="image/*" />
 
-        <!-- 選中物件的小工具條（支援手動調字級大小、顏色、改字、合併、刪除） -->
+        <!-- 選中物件的小工具條 -->
         <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:35; white-space:nowrap;">
           <span class="mc-near-count hidden" style="background:#2563EB; color:#FFF; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;">已選2項</span>
           <button type="button" class="mc-near-dec" title="縮小字體 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
@@ -502,11 +637,17 @@ export class MeasureCanvas {
           <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">刪除</button>
         </div>
 
-        <!-- 尺寸標註浮窗 -->
+        <!-- 尺寸標註浮窗（同時支援單尺、連續累加尺、連續減數尺） -->
         <div class="mc-ruler-box hidden" style="position:absolute; width:min(410px, 95vw); background:#FFF; border:1.5px solid #0F172A; border-radius:10px; padding:8px; box-shadow:0 14px 32px rgba(15,23,42,0.28); z-index:48; display:flex; flex-direction:column; gap:7px;">
           <div class="mc-ruler-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#F1F5F9; padding:3px 7px; border-radius:5px; cursor:grab; font-size:11px; color:#475569;">
-            <strong>⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span></strong>
+            <strong class="mc-ruler-box-title">⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span></strong>
             <button type="button" class="mc-ruler-cancel" style="background:none; border:none; color:#64748B; font-size:12px; font-weight:700; cursor:pointer;">✕</button>
+          </div>
+
+          <!-- 減數連續尺專屬快捷列：一鍵填入剩餘全數 -->
+          <div class="mc-ruler-chain-quick hidden" style="display:flex; justify-content:space-between; align-items:center; gap:6px; background:#FEF2F2; border:1px solid #FECACA; border-radius:6px; padding:4px 8px;">
+            <span class="mc-rchain-rem-label" style="font-size:12px; font-weight:800; color:#991B1B;">目前剩餘：0</span>
+            <button type="button" class="mc-rchain-fill-rem" style="background:#DC2626; color:#FFF; border:none; border-radius:5px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">填入剩餘全數並結束</button>
           </div>
 
           <div style="display:flex; gap:5px;">
@@ -596,6 +737,7 @@ export class MeasureCanvas {
     this.rootEl = this.container.querySelector(".mc-root");
     this.canvas = this.container.querySelector(".mc-canvas");
     this.ctx = this.canvas.getContext("2d");
+    this.chainHudBar = this.container.querySelector(".mc-chain-hud");
     this.nearToolbar = this.container.querySelector(".mc-near-toolbar");
     this.rulerBox = this.container.querySelector(".mc-ruler-box");
     this.rulerInput = this.container.querySelector(".mc-ruler-input");
@@ -664,6 +806,25 @@ export class MeasureCanvas {
     this.rootEl.querySelectorAll(".mc-tool-btn").forEach(btn => {
       btn.onclick = () => this.setMode(btn.dataset.mode);
     });
+
+    // 連續尺 HUD 事件
+    this.chainHudBar.querySelector("#mc-chain-type-sub").onclick = () => {
+      this.chainModeType = "SUB";
+      this.activeChain = null;
+      this.updateChainStatusBar();
+      this.scheduleRender();
+    };
+    this.chainHudBar.querySelector("#mc-chain-type-add").onclick = () => {
+      this.chainModeType = "ADD";
+      this.activeChain = null;
+      this.updateChainStatusBar();
+      this.scheduleRender();
+    };
+    this.chainHudBar.querySelector("#mc-chain-finish-btn").onclick = () => {
+      this.activeChain = null;
+      this.updateChainStatusBar();
+      this.scheduleRender();
+    };
 
     this.rootEl.querySelector(".mc-undo-btn").onclick = () => this.undo();
 
@@ -763,9 +924,22 @@ export class MeasureCanvas {
           this.scheduleRender();
         });
       } else if (single.type === "line") {
-        this.openRulerEditor(scr.x, scr.y, obj.text || "", (newTxt) => {
+        const initRaw = obj.chainId ? (obj.rawText || obj.text || "") : (obj.text || "");
+        this.openRulerEditor(scr.x, scr.y, initRaw, (newTxt) => {
           this.pushUndoSnapshot();
-          obj.text = newTxt;
+          if (obj.chainId) {
+            obj.rawText = newTxt.trim();
+            if (obj.isBaseTotalLine) {
+              const newTot = parseNumericMeasure(newTxt);
+              if (Number.isFinite(newTot)) {
+                this.lines.filter(l => l.chainId === obj.chainId).forEach(s => { s.chainTotal = newTot; });
+              }
+            }
+            this.recalculateChainGroup(obj.chainId);
+            this.updateChainStatusBar();
+          } else {
+            obj.text = newTxt;
+          }
           this.emitSave();
           this.updateNearToolbar();
           this.scheduleRender();
@@ -785,8 +959,17 @@ export class MeasureCanvas {
     this.nearToolbar.querySelector(".mc-near-del").onclick = () => {
       if (!this.selectedItems.length) return;
       this.pushUndoSnapshot();
+      const affectedChains = new Set();
+      this.selectedItems.forEach(it => {
+        if (it.type === "line") {
+          const obj = this.lines[it.index];
+          if (obj?.chainId) affectedChains.add(obj.chainId);
+        }
+      });
       const sortedDesc = [...this.selectedItems].sort((a, b) => b.index - a.index);
       sortedDesc.forEach(it => this.deleteObjectAt(it.type, it.index));
+      affectedChains.forEach(cid => this.recalculateChainGroup(cid));
+      this.updateChainStatusBar();
       this.selectedItems = [];
       this.updateNearToolbar();
       this.emitSave();
@@ -889,7 +1072,7 @@ export class MeasureCanvas {
     this.canvas.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
     this.canvas.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
 
-    // Procreate 級雙指觸控引擎（中心點鎖定縮放 + 同步雙指平移 + 雙指輕點 Undo + 防誤觸離屏鎖）
+    // Procreate 級雙指觸控引擎
     this.canvas.addEventListener("touchstart", (e) => {
       if (e.touches.length >= 2) {
         e.preventDefault();
@@ -987,6 +1170,14 @@ export class MeasureCanvas {
     this.dragGroupState = { startImg: startImgPt, moved: false, snapshots };
   }
 
+  projectPointOntoSegment(px, py, x1, y1, x2, y2) {
+    const l2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+    if (l2 === 0) return { x: x1, y: y1, t: 0 };
+    let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+    t = Math.max(0.05, Math.min(0.95, t));
+    return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1), t };
+  }
+
   handlePointerDown(e) {
     if (this.isTwoFingerGesture || this.touchLiftGuard) return;
     if (e.pointerType === "touch" && !e.isPrimary) return;
@@ -1011,9 +1202,22 @@ export class MeasureCanvas {
             this.scheduleRender();
           });
         } else if (hit.type === "line") {
-          this.openRulerEditor(sx, sy, obj.text || "", (newTxt) => {
+          const initRaw = obj.chainId ? (obj.rawText || obj.text || "") : (obj.text || "");
+          this.openRulerEditor(sx, sy, initRaw, (newTxt) => {
             this.pushUndoSnapshot();
-            obj.text = newTxt;
+            if (obj.chainId) {
+              obj.rawText = newTxt.trim();
+              if (obj.isBaseTotalLine) {
+                const newTot = parseNumericMeasure(newTxt);
+                if (Number.isFinite(newTot)) {
+                  this.lines.filter(l => l.chainId === obj.chainId).forEach(s => { s.chainTotal = newTot; });
+                }
+              }
+              this.recalculateChainGroup(obj.chainId);
+              this.updateChainStatusBar();
+            } else {
+              obj.text = newTxt;
+            }
             this.emitSave();
             this.updateNearToolbar();
             this.scheduleRender();
@@ -1050,7 +1254,10 @@ export class MeasureCanvas {
       const hit = this.hitTest(pt.x, pt.y);
       if (hit) {
         this.pushUndoSnapshot();
+        const delChainId = hit.type === "line" ? this.lines[hit.index]?.chainId : null;
         this.deleteObjectAt(hit.type, hit.index);
+        if (delChainId) this.recalculateChainGroup(delChainId);
+        this.updateChainStatusBar();
         this.selectedItems = [];
         this.updateNearToolbar();
         this.emitSave();
@@ -1132,6 +1339,83 @@ export class MeasureCanvas {
         strokeWidth: this.strokeWidth,
         fontSize: 15,
         text: ""
+      };
+      return;
+    }
+
+    if (this.mode === "CHAIN_RULER") {
+      // 如果已有進行中的連續尺：起點自動銜接上一段終點（也可點擊現有基準線切一刀分割）
+      if (this.activeChain) {
+        const tol = 22 / this.scale;
+        const baseIdx = this.lines.findIndex(l => l.chainId === this.activeChain.id && l.isBaseTotalLine);
+        if (baseIdx >= 0) {
+          const baseLine = this.lines[baseIdx];
+          if (this.distToSegment(pt.x, pt.y, baseLine.x1, baseLine.y1, baseLine.x2, baseLine.y2) < tol) {
+            const splitPt = this.projectPointOntoSegment(pt.x, pt.y, baseLine.x1, baseLine.y1, baseLine.x2, baseLine.y2);
+            const midScr = this.imgToScreen((baseLine.x1 + splitPt.x) / 2, (baseLine.y1 + splitPt.y) / 2);
+            const summary = this.getActiveChainSummary();
+            this.openRulerEditor(midScr.x, midScr.y, "", (txt) => {
+              const cleanTxt = txt.trim();
+              if (!cleanTxt) return;
+              this.pushUndoSnapshot();
+              const newSeg = {
+                type: "line",
+                x1: baseLine.x1, y1: baseLine.y1,
+                x2: splitPt.x, y2: splitPt.y,
+                color: baseLine.color,
+                strokeWidth: baseLine.strokeWidth,
+                fontSize: baseLine.fontSize || 15,
+                chainId: this.activeChain.id,
+                chainType: "SUB",
+                chainTotal: this.activeChain.total,
+                rawText: cleanTxt,
+                text: ""
+              };
+              baseLine.x1 = splitPt.x;
+              baseLine.y1 = splitPt.y;
+              baseLine.isRemainderSeg = true;
+              this.lines.splice(baseIdx, 0, newSeg);
+              this.activeChain.lastPt = { x: splitPt.x, y: splitPt.y };
+              this.recalculateChainGroup(this.activeChain.id);
+              this.updateChainStatusBar();
+              this.emitSave();
+              this.scheduleRender();
+            }, {
+              title: `➖ 分割扣減段（目前剩餘 ${formatCleanNum(summary?.remaining || 0)}）`,
+              chainRemaining: summary?.remaining
+            });
+            return;
+          }
+        }
+
+        // 從上一段終點自動出發拉下一段
+        this.isDrawing = true;
+        this.draftObj = {
+          type: "line",
+          x1: this.activeChain.lastPt.x,
+          y1: this.activeChain.lastPt.y,
+          x2: pt.x,
+          y2: pt.y,
+          color: this.activeColor,
+          strokeWidth: this.strokeWidth,
+          fontSize: 15,
+          text: "",
+          isChainDraft: true
+        };
+        this.scheduleRender();
+        return;
+      }
+
+      // 尚未開始連續尺：拉第一條線
+      this.isDrawing = true;
+      this.draftObj = {
+        type: "line",
+        x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+        color: this.activeColor,
+        strokeWidth: this.strokeWidth,
+        fontSize: 15,
+        text: "",
+        isChainDraft: true
       };
       return;
     }
@@ -1268,6 +1552,87 @@ export class MeasureCanvas {
       return;
     }
 
+    if (finished.type === "line" && finished.isChainDraft) {
+      delete finished.isChainDraft;
+      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 8 / this.scale) {
+        this.scheduleRender();
+        return;
+      }
+      const midScr = this.imgToScreen((finished.x1 + finished.x2) / 2, (finished.y1 + finished.y2) / 2);
+
+      // 情況 A：尚未建立連續尺（第一條線）
+      if (!this.activeChain) {
+        const isSub = this.chainModeType === "SUB";
+        this.openRulerEditor(midScr.x, midScr.y, "", (txt) => {
+          const cleanTxt = txt.trim();
+          const parsedVal = parseNumericMeasure(cleanTxt);
+          if (!cleanTxt) { this.scheduleRender(); return; }
+
+          this.pushUndoSnapshot();
+          const newChainId = "CH_" + Date.now();
+          const totalNum = Number.isFinite(parsedVal) ? parsedVal : 0;
+
+          finished.chainId = newChainId;
+          finished.chainType = this.chainModeType;
+          finished.rawText = cleanTxt;
+          if (isSub) {
+            finished.chainTotal = totalNum;
+            finished.isBaseTotalLine = true;
+          }
+          this.lines.push(finished);
+          this.activeChain = {
+            id: newChainId,
+            type: this.chainModeType,
+            total: isSub ? totalNum : null,
+            lastPt: { x: finished.x2, y: finished.y2 }
+          };
+          this.recalculateChainGroup(newChainId);
+          this.updateChainStatusBar();
+          this.emitSave();
+          this.scheduleRender();
+        }, {
+          title: isSub ? "➖ 第1步：輸入牆身總長（如 6000 或 6m）" : "➕ 累加尺第1段：輸入尺寸"
+        });
+        return;
+      }
+
+      // 情況 B：已有連續尺，繼續分段（如果是減數尺的基準總線，自動轉為分段結構）
+      const summary = this.getActiveChainSummary();
+      this.openRulerEditor(midScr.x, midScr.y, "", (txt, isFinishAll = false) => {
+        const cleanTxt = txt.trim();
+        if (!cleanTxt) { this.scheduleRender(); return; }
+
+        this.pushUndoSnapshot();
+        // 若第一條基準總線尚未分割，先把基準總線轉為第一段扣減段
+        const baseIdx = this.lines.findIndex(l => l.chainId === this.activeChain.id && l.isBaseTotalLine);
+        if (baseIdx >= 0) {
+          this.lines.splice(baseIdx, 1);
+        }
+
+        finished.chainId = this.activeChain.id;
+        finished.chainType = this.activeChain.type;
+        if (this.activeChain.type === "SUB") finished.chainTotal = this.activeChain.total;
+        finished.rawText = cleanTxt;
+        this.lines.push(finished);
+
+        this.activeChain.lastPt = { x: finished.x2, y: finished.y2 };
+        this.recalculateChainGroup(this.activeChain.id);
+
+        if (isFinishAll) {
+          this.activeChain = null;
+        }
+        this.updateChainStatusBar();
+        this.emitSave();
+        this.scheduleRender();
+      }, {
+        title: this.activeChain.type === "SUB"
+          ? `➖ 輸入本段扣減尺寸（目前剩餘 ${formatCleanNum(summary?.remaining || 0)}）`
+          : `➕ 輸入下一段尺寸（目前累計 ${formatCleanNum(summary?.sum || 0)}）`,
+        chainRemaining: this.activeChain.type === "SUB" ? summary?.remaining : null
+      });
+      return;
+    }
+
     if (finished.type === "line") {
       if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10 / this.scale) {
         this.scheduleRender();
@@ -1311,13 +1676,33 @@ export class MeasureCanvas {
     this.rulerBox.classList.add("hidden");
   }
 
-  openRulerEditor(screenX, screenY, initialText, onConfirm) {
+  openRulerEditor(screenX, screenY, initialText, onConfirm, chainOpts = {}) {
     this.hideAllEditors();
     this.nearToolbar.style.display = "none";
     this.pendingRulerAction = onConfirm;
     this.rulerInput.value = initialText || "";
     this.activeRulerTargetInput = this.rulerInput;
     this.rulerBox.querySelector(".mc-ruler-split-box")?.classList.add("hidden");
+
+    const titleEl = this.rulerBox.querySelector(".mc-ruler-box-title");
+    if (titleEl) {
+      titleEl.innerHTML = chainOpts.title
+        ? `⠿ ${chainOpts.title}`
+        : `⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span>`;
+    }
+
+    const chainQuickBar = this.rulerBox.querySelector(".mc-ruler-chain-quick");
+    if (chainOpts.chainRemaining !== null && chainOpts.chainRemaining !== undefined && Number.isFinite(chainOpts.chainRemaining)) {
+      chainQuickBar.classList.remove("hidden");
+      chainQuickBar.querySelector(".mc-rchain-rem-label").textContent = `目前剩餘：${formatCleanNum(chainOpts.chainRemaining)}`;
+      chainQuickBar.querySelector(".mc-rchain-fill-rem").onclick = () => {
+        this.rulerInput.value = formatCleanNum(chainOpts.chainRemaining);
+        this.commitRulerEditor(true, true);
+      };
+    } else {
+      chainQuickBar.classList.add("hidden");
+    }
+
     this.rulerBox.classList.remove("hidden");
 
     const boxW = Math.min(410, this.viewW * 0.95);
@@ -1453,13 +1838,13 @@ export class MeasureCanvas {
     });
   }
 
-  commitRulerEditor(shouldSave = true) {
+  commitRulerEditor(shouldSave = true, isFinishAll = false) {
     if (!this.pendingRulerAction) return;
     const val = this.rulerInput.value;
     const fn = this.pendingRulerAction;
     this.pendingRulerAction = null;
     this.rulerBox.classList.add("hidden");
-    if (shouldSave) fn(val);
+    if (shouldSave) fn(val, isFinishAll);
     this.updateNearToolbar();
   }
 
@@ -1661,7 +2046,6 @@ export class MeasureCanvas {
     else if (type === "overlay") this.overlays.splice(idx, 1);
   }
 
-  // 固定螢幕字級邊界計算：除以 this.scale 抵消畫布縮放，保證字體大小始終不隨縮放改變
   getPillBoundsImg(ix, iy, text, fontPx = 15, targetScale = this.scale) {
     const fs = fontPx / targetScale;
     this.ctx.save();
@@ -1820,15 +2204,18 @@ export class MeasureCanvas {
     allLines.forEach((l, idx) => {
       ctx.save();
       const sw = (l.strokeWidth || 1.6) / this.scale;
-      ctx.strokeStyle = l.color || "#2563EB";
-      ctx.lineWidth = sw;
+      const isChain = Boolean(l.chainId || l.isChainDraft);
+      const lineCol = l.color || (isChain ? "#DC2626" : "#2563EB");
+      ctx.strokeStyle = lineCol;
+      ctx.lineWidth = isChain ? sw * 1.2 : sw;
       ctx.beginPath();
       ctx.moveTo(l.x1, l.y1);
       ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
 
-      const r = 3.5 / this.scale;
-      ctx.fillStyle = l.color || "#2563EB";
+      // 連續尺節點畫明顯圓點與垂直端線，普通拉尺畫圓點
+      const r = (isChain ? 4.5 : 3.5) / this.scale;
+      ctx.fillStyle = lineCol;
       ctx.beginPath();
       ctx.arc(l.x1, l.y1, r, 0, Math.PI * 2);
       ctx.arc(l.x2, l.y2, r, 0, Math.PI * 2);
@@ -1837,7 +2224,7 @@ export class MeasureCanvas {
       if (l.text) {
         const mx = (l.x1 + l.x2) / 2;
         const my = (l.y1 + l.y2) / 2;
-        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 15, 0.88, this.scale, false);
+        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", lineCol, l.fontSize || 15, 0.92, this.scale, false);
       }
       if (this.isItemSelected("line", idx)) {
         ctx.strokeStyle = "#FACC15";
@@ -1850,6 +2237,17 @@ export class MeasureCanvas {
       }
       ctx.restore();
     });
+
+    // 若目前正在進行連續尺，在最後接點畫一個脈衝指示圈提示下一段起點
+    if (this.mode === "CHAIN_RULER" && this.activeChain?.lastPt) {
+      ctx.save();
+      ctx.strokeStyle = "#2563EB";
+      ctx.lineWidth = 2 / this.scale;
+      ctx.beginPath();
+      ctx.arc(this.activeChain.lastPt.x, this.activeChain.lastPt.y, 8 / this.scale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     const allArrows = this.draftObj?.type === "arrow" ? [...this.arrows, this.draftObj] : this.arrows;
     allArrows.forEach((a, idx) => {
