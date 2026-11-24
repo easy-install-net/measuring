@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { db, COLLECTIONS } from "./config/firebase-init.js";
 import { loadMasterDict } from "./config/master-dict.js";
 import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
@@ -26,9 +26,11 @@ let cachedCloudActiveList = null;
 let cachedCloudArchivedList = null;
 let openContactProjId = null;
 let activeCanvasInstance = null;
+let overviewRenderGeneration = 0;
 
 let cloudStampGroups = [];
 let cloudPhraseBank = [];
+let cloudPresetSpaces = ["總圖", "玄關", "客廳", "飯廳", "廚房", "主人房", "兒童房", "工人房", "浴室", "露台"];
 const memoryPhotoCache = new Map();
 
 const CORE_CATEGORIES = ["度尺圖", "平面圖", "繪圖", "效果圖"];
@@ -43,10 +45,10 @@ function normalizePageCategory(p) {
 }
 
 const REVIEW_STATUS_META = {
-  NEED_FIX:   { label: "❌ 需修改",   bg: "#FEE2E2", text: "#991B1B", border: "#FCA5A5", badgeBg: "#DC2626", badgeText: "#FFFFFF" },
-  SITE_CHECK: { label: "⚠️ 現場核對", bg: "#FEF3C7", text: "#92400E", border: "#FCD34D", badgeBg: "#D97706", badgeText: "#FFFFFF" },
+  NEED_FIX:   { label: "❌ 需改",     bg: "#FEE2E2", text: "#991B1B", border: "#FCA5A5", badgeBg: "#DC2626", badgeText: "#FFFFFF" },
+  SITE_CHECK: { label: "⚠️ 再核對",   bg: "#FEF3C7", text: "#92400E", border: "#FCD34D", badgeBg: "#D97706", badgeText: "#FFFFFF" },
   NEED_INFO:  { label: "📌 待補資料", bg: "#DBEAFE", text: "#1E40AF", border: "#93C5FD", badgeBg: "#2563EB", badgeText: "#FFFFFF" },
-  OK:         { label: "✅ 確認無誤", bg: "#DCFCE7", text: "#166534", border: "#86EFAC", badgeBg: "#059669", badgeText: "#FFFFFF" }
+  OK:         { label: "✅ 確認",     bg: "#DCFCE7", text: "#166534", border: "#86EFAC", badgeBg: "#059669", badgeText: "#FFFFFF" }
 };
 const STATUS_CYCLE_ORDER = ["NEED_FIX", "SITE_CHECK", "NEED_INFO", "OK"];
 
@@ -62,11 +64,8 @@ function applyBrandTitle() {
   document.querySelectorAll("header, nav, .navbar, .topbar, h1, a, span, strong, div, button").forEach(el => {
     if (el.children.length === 0 && el.textContent) {
       const txt = el.textContent.trim();
-      if (txt === "MEASURING") {
-        el.textContent = "度尺批改";
-      } else if (txt === "登入" && (el.tagName === "BUTTON" || el.tagName === "A")) {
-        el.style.display = "none";
-      }
+      if (txt === "MEASURING") el.textContent = "度尺批改";
+      else if (txt === "登入" && (el.tagName === "BUTTON" || el.tagName === "A")) el.style.display = "none";
     }
   });
 }
@@ -156,8 +155,13 @@ async function loadCloudDictionaryFromDB() {
       const data = snap.data();
       if (Array.isArray(data.stampGroups)) cloudStampGroups = data.stampGroups;
       if (Array.isArray(data.phraseBank)) cloudPhraseBank = data.phraseBank;
-    } else if (masterDict && Array.isArray(masterDict.stampGroups)) {
-      cloudStampGroups = masterDict.stampGroups;
+      if (Array.isArray(data.presetSpaces) && data.presetSpaces.length) cloudPresetSpaces = data.presetSpaces;
+    } else if (masterDict) {
+      if (Array.isArray(masterDict.stampGroups)) cloudStampGroups = masterDict.stampGroups;
+      if (Array.isArray(masterDict.spaceGroups)) {
+        const dictSpaces = masterDict.spaceGroups.flatMap(g => (g.items || []).map(i => i.name));
+        if (dictSpaces.length) cloudPresetSpaces = [...new Set(["總圖", ...dictSpaces])];
+      }
     }
   } catch (_) {}
 }
@@ -166,6 +170,7 @@ async function saveCloudDictionaryToDB() {
   await setDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID), {
     stampGroups: cloudStampGroups,
     phraseBank: cloudPhraseBank,
+    presetSpaces: cloudPresetSpaces,
     updatedAt: Date.now()
   });
 }
@@ -233,23 +238,26 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
 
   const renderModalContent = () => {
     overlay.innerHTML = `
-      <div style="width:min(520px, 96vw); max-height:86vh; background:#FFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 40px rgba(0,0,0,0.3);">
+      <div style="width:min(540px, 96vw); max-height:86vh; background:#FFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 40px rgba(0,0,0,0.3);">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:8px;">
-          <strong style="font-size:15px; color:#0F172A;">⚙️ 雲端 Database 詞庫管理</strong>
+          <strong style="font-size:15px; color:#0F172A;">⚙️ 雲端預設空間與詞庫管理</strong>
           <button id="cdm-close" style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:3px 9px; font-size:12px; font-weight:700; cursor:pointer;">完成關閉</button>
         </div>
 
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
-          <div style="display:flex; gap:6px;">
+          <div style="display:flex; gap:5px; flex-wrap:wrap;">
+            <button id="cdm-tab-space" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "SPACE" ? "#059669" : "#CBD5E1"}; background:${activeTab === "SPACE" ? "#059669" : "#F8FAFC"}; color:${activeTab === "SPACE" ? "#FFF" : "#334155"};">
+              預設空間 (${cloudPresetSpaces.length})
+            </button>
             <button id="cdm-tab-stamp" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "STAMP" ? "#0F172A" : "#CBD5E1"}; background:${activeTab === "STAMP" ? "#0F172A" : "#F8FAFC"}; color:${activeTab === "STAMP" ? "#FFF" : "#334155"};">
-              🏷️ 現場印章詞庫 (${cloudStampGroups.reduce((a, g) => a + (g.items || []).length, 0)})
+              現場詞庫 (${cloudStampGroups.reduce((a, g) => a + (g.items || []).length, 0)})
             </button>
             <button id="cdm-tab-phrase" style="padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; cursor:pointer; border:1px solid ${activeTab === "PHRASE" ? "#2563EB" : "#CBD5E1"}; background:${activeTab === "PHRASE" ? "#2563EB" : "#F8FAFC"}; color:${activeTab === "PHRASE" ? "#FFF" : "#334155"};">
-              ↗ 批改短語庫 (${cloudPhraseBank.length})
+              批改短語庫 (${cloudPhraseBank.length})
             </button>
           </div>
           <button id="cdm-seed-btn" style="background:#FEF3C7; color:#92400E; border:1px solid #F59E0B; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:700; cursor:pointer;">
-            ☁️ 匯入範本至雲端DB
+            匯入範本至雲端DB
           </button>
         </div>
 
@@ -261,10 +269,11 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
       overlay.remove();
       if (typeof onCloseRefresh === "function") onCloseRefresh();
     };
+    overlay.querySelector("#cdm-tab-space").onclick = () => { activeTab = "SPACE"; renderModalContent(); };
     overlay.querySelector("#cdm-tab-stamp").onclick = () => { activeTab = "STAMP"; renderModalContent(); };
     overlay.querySelector("#cdm-tab-phrase").onclick = () => { activeTab = "PHRASE"; renderModalContent(); };
     overlay.querySelector("#cdm-seed-btn").onclick = async () => {
-      if (!confirm("確定將標準「電掣/水煤/收口印章」及「40條審圖短語」寫入 Firebase 雲端資料庫嗎？")) return;
+      if (!confirm("確定將標準「電掣/水煤/收口詞庫」及「40條審圖短語」寫入 Firebase 雲端資料庫嗎？")) return;
       const seed = getSeedTemplatesForDB();
       if (!cloudStampGroups.length) cloudStampGroups = seed.stampGroups;
       if (!cloudPhraseBank.length) cloudPhraseBank = seed.phraseBank;
@@ -273,11 +282,40 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
     };
 
     const bodyEl = overlay.querySelector("#cdm-body");
-    if (activeTab === "STAMP") {
+    if (activeTab === "SPACE") {
+      bodyEl.innerHTML = `
+        <div style="display:flex; gap:5px;">
+          <input type="text" id="cdm-sp-word" placeholder="輸入新預設空間（如：衣帽間 / 儲物房 / 工人廁）" style="flex:1; padding:6px 8px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
+          <button id="cdm-sp-add" class="btn-solid btn-sm" style="background:#059669; border-color:#059669;">+ 新增空間</button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px; padding:6px 0;">
+          ${cloudPresetSpaces.map((sp, idx) => `
+            <span style="display:inline-flex; align-items:center; gap:5px; background:#F0FDF4; border:1px solid #86EFAC; color:#166534; border-radius:999px; padding:3px 10px; font-size:12px; font-weight:700;">
+              ${sp}
+              <button class="cdm-del-sp" data-spidx="${idx}" style="background:none; border:none; color:#15803D; cursor:pointer; padding:0; font-weight:800;">✕</button>
+            </span>
+          `).join("")}
+        </div>
+      `;
+      bodyEl.querySelector("#cdm-sp-add").onclick = async () => {
+        const w = (bodyEl.querySelector("#cdm-sp-word").value || "").trim();
+        if (!w || cloudPresetSpaces.includes(w)) return;
+        cloudPresetSpaces.push(w);
+        await saveCloudDictionaryToDB();
+        renderModalContent();
+      };
+      bodyEl.querySelectorAll(".cdm-del-sp").forEach(b => {
+        b.onclick = async () => {
+          cloudPresetSpaces.splice(Number(b.dataset.spidx), 1);
+          await saveCloudDictionaryToDB();
+          renderModalContent();
+        };
+      });
+    } else if (activeTab === "STAMP") {
       bodyEl.innerHTML = `
         <div style="display:flex; gap:5px; flex-wrap:wrap;">
           <input type="text" id="cdm-st-cat" placeholder="分類（如：電掣 / 水煤 / 收口）" style="width:130px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <input type="text" id="cdm-st-word" placeholder="新印章詞（如：13A單蘇 / 煤氣錶）" style="flex:1; min-width:140px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
+          <input type="text" id="cdm-st-word" placeholder="新詞彙（如：13A單蘇 / 煤氣錶）" style="flex:1; min-width:140px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
           <button id="cdm-st-add" class="btn-solid btn-sm">+ 存入雲端</button>
         </div>
         ${cloudStampGroups.map((g, gIdx) => `
@@ -295,7 +333,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
               `).join("")}
             </div>
           </div>
-        `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有印章詞彙，可手動新增或點上方「☁️ 匯入範本至雲端DB」。</div>`}
+        `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有詞彙，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
       `;
 
       bodyEl.querySelector("#cdm-st-add").onclick = async () => {
@@ -314,7 +352,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
           await saveCloudDictionaryToDB();
           renderModalContent();
         };
-
+      });
       bodyEl.querySelectorAll(".cdm-del-group").forEach(b => {
         b.onclick = async () => {
           cloudStampGroups.splice(Number(b.dataset.gidx), 1);
@@ -337,11 +375,11 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
                 <span>${p.text}</span>
               </div>
               <div style="display:flex; gap:4px;">
-                <button class="cdm-ph-edit" data-idx="${idx}" style="background:none; border:none; color:#475569; cursor:pointer; font-size:11px;">✏️</button>
+                <button class="cdm-ph-edit" data-idx="${idx}" style="background:none; border:none; color:#475569; cursor:pointer; font-size:11px;">改</button>
                 <button class="cdm-ph-del" data-idx="${idx}" style="background:none; border:none; color:#DC2626; cursor:pointer; font-size:12px;">✕</button>
               </div>
             </div>
-          `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有短語，可手動新增或點上方「☁️ 匯入範本至雲端DB」。</div>`}
+          `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有短語，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
         </div>
       `;
 
@@ -378,6 +416,86 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
   renderModalContent();
 }
 
+function openQuickReassignModal(page, projectSpaces, onUpdated) {
+  const existing = document.getElementById("quick-reassign-modal");
+  if (existing) existing.remove();
+
+  let selectedCat = normalizePageCategory(page);
+  let selectedSpace = page.space || "未標空間";
+  const allChoices = [...new Set([...projectSpaces, ...cloudPresetSpaces])].filter(s => s && s !== "未標空間");
+
+  const overlay = document.createElement("div");
+  overlay.id = "quick-reassign-modal";
+  overlay.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,0.52); display:flex; align-items:center; justify-content:center; z-index:1250; padding:12px;";
+
+  const renderBox = () => {
+    overlay.innerHTML = `
+      <div style="width:min(400px, 94vw); background:#FFF; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:12px; box-shadow:0 20px 40px rgba(0,0,0,0.28);">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:6px;">
+          <strong style="font-size:14px; color:#0F172A;">修改 ${page.pageNum || ""} 分類與所屬空間</strong>
+          <button id="qrm-close" style="background:none; border:none; color:#64748B; font-size:15px; cursor:pointer;">✕</button>
+        </div>
+
+        <div>
+          <div style="font-size:11px; font-weight:800; color:#475569; margin-bottom:5px;">1. 點選圖紙分類</div>
+          <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:6px;">
+            ${CORE_CATEGORIES.map(c => `
+              <button type="button" class="qrm-cat-btn" data-qcat="${c}"
+                      style="padding:6px 4px; border-radius:7px; font-size:12px; font-weight:800; cursor:pointer; border:1.5px solid ${selectedCat === c ? "#2563EB" : "#CBD5E1"}; background:${selectedCat === c ? "#DBEAFE" : "#F8FAFC"}; color:${selectedCat === c ? "#1D4ED8" : "#334155"};">
+                ${c}
+              </button>
+            `).join("")}
+          </div>
+        </div>
+
+        <div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+            <span style="font-size:11px; font-weight:800; color:#475569;">2. 點選所屬空間</span>
+            <button type="button" id="qrm-manage-sp" style="background:none; border:none; color:#2563EB; font-size:11px; font-weight:700; cursor:pointer;">⚙️ 管理預設空間</button>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; max-height:190px; overflow-y:auto;">
+            ${allChoices.map(sp => `
+              <button type="button" class="qrm-sp-btn" data-qsp="${sp}"
+                      style="padding:5px 11px; border-radius:999px; font-size:12px; font-weight:700; cursor:pointer; border:1.5px solid ${selectedSpace === sp ? "#0F172A" : "#CBD5E1"}; background:${selectedSpace === sp ? "#0F172A" : "#FFF"}; color:${selectedSpace === sp ? "#FFF" : "#1E293B"};">
+                ${sp}
+              </button>
+            `).join("")}
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:6px; border-top:1px solid #E2E8F0; padding-top:8px;">
+          <button id="qrm-cancel" class="btn-outline btn-sm">取消</button>
+          <button id="qrm-save" class="btn-solid btn-sm">確定套用</button>
+        </div>
+      </div>
+    `;
+
+    overlay.querySelector("#qrm-close").onclick = () => overlay.remove();
+    overlay.querySelector("#qrm-cancel").onclick = () => overlay.remove();
+    overlay.querySelector("#qrm-manage-sp").onclick = () => {
+      overlay.remove();
+      openCloudDictModal("SPACE", () => openQuickReassignModal(page, projectSpaces, onUpdated));
+    };
+    overlay.querySelectorAll(".qrm-cat-btn").forEach(b => {
+      b.onclick = () => { selectedCat = b.dataset.qcat; renderBox(); };
+    });
+    overlay.querySelectorAll(".qrm-sp-btn").forEach(b => {
+      b.onclick = () => { selectedSpace = b.dataset.qsp; renderBox(); };
+    });
+    overlay.querySelector("#qrm-save").onclick = async () => {
+      page.docTypeLabel = selectedCat;
+      page.space = selectedSpace;
+      page.title = `${selectedSpace} · ${selectedCat}`;
+      overlay.remove();
+      await saveCurrentProject();
+      if (typeof onUpdated === "function") onUpdated();
+    };
+  };
+
+  document.body.appendChild(overlay);
+  renderBox();
+}
+
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -402,7 +520,6 @@ watchAuth(async () => {
   renderLoginView(root);
 });
 
-// 修復：直接讀取全部工程文件再前端過濾，避免 Firestore where("archived","!=",true) 把沒有 archived 欄位的舊工程過濾掉
 async function fetchAllCloudProjectsSplit(forceRefresh = false) {
   if (!forceRefresh && Array.isArray(cachedCloudActiveList) && Array.isArray(cachedCloudArchivedList)) {
     return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
@@ -512,7 +629,7 @@ async function renderProjectList(options = {}) {
                   </button>
                   <button class="btn-rename-proj" data-rename-pid="${p.id}" title="修改工程名稱"
                           style="background:none; border:1px solid #E2E8F0; border-radius:5px; padding:1px 5px; font-size:11px; color:#64748B; cursor:pointer;">✏️</button>
-                  ${fixCnt > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#991B1B; font-weight:700; padding:1px 6px; border-radius:4px;">❌ ${fixCnt}需修改</span>` : ""}
+                  ${fixCnt > 0 ? `<span style="font-size:11px; background:#FEE2E2; color:#991B1B; font-weight:700; padding:1px 6px; border-radius:4px;">❌ ${fixCnt}需改</span>` : ""}
                   ${checkCnt > 0 ? `<span style="font-size:11px; background:#FEF3C7; color:#92400E; font-weight:700; padding:1px 6px; border-radius:4px;">⚠️ ${checkCnt}待核/補</span>` : ""}
                 </div>
                 <div style="font-size:12px; color:#6B7280; margin-top:2px; cursor:pointer;" data-id="${p.id}">
@@ -540,7 +657,7 @@ async function renderProjectList(options = {}) {
     </div>
   `;
 
-  document.getElementById("btn-home-cloud-dict").onclick = () => openCloudDictModal("STAMP");
+  document.getElementById("btn-home-cloud-dict").onclick = () => openCloudDictModal("SPACE");
   const emptySummonBtn = document.getElementById("btn-empty-summon");
   if (emptySummonBtn) emptySummonBtn.onclick = () => { document.getElementById("summon-cloud-box").classList.remove("hidden"); populateSummonList(false); };
 
@@ -573,7 +690,7 @@ async function renderProjectList(options = {}) {
   root.querySelectorAll(".btn-contact-toggle").forEach(btn => {
     btn.onclick = (e) => { e.stopPropagation(); const pid = btn.dataset.contactPid; openContactProjId = openContactProjId === pid ? null : pid; renderProjectList(); };
   });
-  bindContactEvents(visibleProjects);
+  bindContactEvents(visibleProjects, () => renderProjectList());
 
   root.querySelectorAll(".btn-rename-proj").forEach(btn => {
     btn.onclick = async (e) => {
@@ -617,6 +734,7 @@ async function renderProjectList(options = {}) {
 
 function renderContactDrawerHtml(proj) {
   const contacts = Array.isArray(proj.contacts) ? proj.contacts : [];
+  const rolePresets = ["in charge", "設計師", "業主", "判頭", "現場負責", "管理處"];
   return `
     <div style="background:#FFFBEB; border:1px solid #FCD34D; border-radius:6px; padding:7px 9px; display:flex; flex-direction:column; gap:6px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -624,25 +742,37 @@ function renderContactDrawerHtml(proj) {
         <button class="btn-contact-close btn-outline btn-sm" style="padding:1px 6px; font-size:11px;">收起</button>
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center;">
-        <input type="text" id="ct-name-${proj.id}" placeholder="自由輸入（如：業主陳生 / 木工阿明 / 鎖匙放管理處）"
-               style="flex:2; min-width:170px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
+        <input type="text" id="ct-name-${proj.id}" placeholder="人名 / 事項"
+               style="flex:1.2; min-width:110px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
+        <input type="text" id="ct-role-${proj.id}" placeholder="崗位 / 備註（如：in charge）"
+               style="flex:1.2; min-width:120px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
         <input type="tel" id="ct-phone-${proj.id}" placeholder="電話（選填）"
-               style="flex:1; min-width:105px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
+               style="flex:1; min-width:100px; padding:5px 7px; border:1px solid #D97706; border-radius:4px; font-size:12px; background:#FFF;" />
         <button class="btn-solid btn-sm btn-ct-add" data-pid="${proj.id}" style="background:#D97706; border-color:#D97706;">+ 記低</button>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:4px;">
+        ${rolePresets.map(r => `
+          <button type="button" class="btn-ct-role-preset" data-pid="${proj.id}" data-rval="${r}"
+                  style="background:#FEF3C7; color:#92400E; border:1px solid #F59E0B; border-radius:999px; padding:1px 7px; font-size:10px; font-weight:700; cursor:pointer;">
+            + ${r}
+          </button>
+        `).join("")}
       </div>
       <div style="display:flex; flex-direction:column; gap:4px;">
         ${contacts.map((c, idx) => {
           const waUrl = formatWhatsAppUrl(c.phone);
-          const displayLine = [c.name, c.note].filter(Boolean).join(" · ");
+          const roleText = c.role || c.note || "";
           return `
             <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; background:#FFF; border:1px solid #FDE68A; border-radius:5px; padding:4px 8px; flex-wrap:wrap;">
-              <div style="font-size:12px; color:#1E293B;">
-                <strong>${displayLine || "臨時記錄"}</strong>
-                ${c.phone ? `<span style="color:#0284C7; margin-left:6px; font-weight:600;">${c.phone}</span>` : ""}
+              <div style="font-size:12px; color:#1E293B; display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
+                <strong>${c.name || "臨時記錄"}</strong>
+                ${roleText ? `<span style="background:#FEF3C7; color:#92400E; border:1px solid #FCD34D; border-radius:4px; padding:0 5px; font-size:11px; font-weight:700;">${roleText}</span>` : ""}
+                ${c.phone ? `<span style="color:#0284C7; font-weight:600;">${c.phone}</span>` : ""}
               </div>
               <div style="display:flex; gap:5px; align-items:center;">
                 ${c.phone ? `<a href="tel:${c.phone}" class="btn-outline btn-sm" style="text-decoration:none; padding:1px 6px; font-size:11px; color:#059669; border-color:#6EE7B7;">📞 撥打</a>` : ""}
                 ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener noreferrer" class="btn-outline btn-sm" style="text-decoration:none; padding:1px 6px; font-size:11px; color:#16A34A; border-color:#86EFAC;">💬 WhatsApp</a>` : ""}
+                <button class="btn-ct-edit" data-pid="${proj.id}" data-cidx="${idx}" title="編輯崗位或電話" style="background:none; border:none; color:#475569; font-size:11px; cursor:pointer; padding:0 3px;">✏️</button>
                 <button class="btn-ct-del" data-pid="${proj.id}" data-cidx="${idx}" style="background:none; border:none; color:#94A3B8; font-size:12px; cursor:pointer; padding:0 4px;">✕</button>
               </div>
             </div>
@@ -653,23 +783,52 @@ function renderContactDrawerHtml(proj) {
   `;
 }
 
-function bindContactEvents(projectListRef) {
-  root.querySelectorAll(".btn-contact-close").forEach(btn => { btn.onclick = () => { openContactProjId = null; renderProjectList(); }; });
+function bindContactEvents(projectListRef, onRefresh) {
+  root.querySelectorAll(".btn-contact-close").forEach(btn => { btn.onclick = () => { openContactProjId = null; onRefresh(); }; });
+  root.querySelectorAll(".btn-ct-role-preset").forEach(btn => {
+    btn.onclick = () => {
+      const inp = document.getElementById(`ct-role-${btn.dataset.pid}`);
+      if (inp) { inp.value = btn.dataset.rval; inp.focus(); }
+    };
+  });
   root.querySelectorAll(".btn-ct-add").forEach(btn => {
     btn.onclick = async () => {
       const pid = btn.dataset.pid;
       const target = projectListRef.find(p => p.id === pid);
       if (!target) return;
       const nameVal = (document.getElementById(`ct-name-${pid}`)?.value || "").trim();
+      const roleVal = (document.getElementById(`ct-role-${pid}`)?.value || "").trim();
       const phoneVal = (document.getElementById(`ct-phone-${pid}`)?.value || "").trim();
-      if (!nameVal && !phoneVal) return;
+      if (!nameVal && !roleVal && !phoneVal) return;
       if (!Array.isArray(target.contacts)) target.contacts = [];
-      target.contacts.push({ name: nameVal || "聯絡記錄", phone: phoneVal });
+      target.contacts.push({ name: nameVal || "聯絡記錄", role: roleVal, phone: phoneVal });
       target.updatedAt = Date.now();
       const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
       await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
       upsertLocalProject(target);
-      renderProjectList();
+      onRefresh();
+    };
+  });
+  root.querySelectorAll(".btn-ct-edit").forEach(btn => {
+    btn.onclick = async () => {
+      const pid = btn.dataset.pid;
+      const target = projectListRef.find(p => p.id === pid);
+      const item = target?.contacts?.[Number(btn.dataset.cidx)];
+      if (!item) return;
+      const nextName = prompt("修改人名 / 事項：", item.name || "");
+      if (nextName === null) return;
+      const nextRole = prompt("修改崗位 / 備註（如：in charge）：", item.role || item.note || "");
+      if (nextRole === null) return;
+      const nextPhone = prompt("修改電話：", item.phone || "");
+      if (nextPhone === null) return;
+      item.name = nextName.trim() || item.name;
+      item.role = nextRole.trim();
+      item.phone = nextPhone.trim();
+      target.updatedAt = Date.now();
+      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
+      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
+      upsertLocalProject(target);
+      onRefresh();
     };
   });
   root.querySelectorAll(".btn-ct-del").forEach(btn => {
@@ -682,7 +841,7 @@ function bindContactEvents(projectListRef) {
       const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
       await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
       upsertLocalProject(target);
-      renderProjectList();
+      onRefresh();
     };
   });
 }
@@ -896,6 +1055,11 @@ function openProject(proj) {
 
 async function saveCurrentProject() {
   if (!currentProject) return;
+  const syncEl = document.getElementById("top-auto-save-status");
+  if (syncEl) {
+    syncEl.textContent = "⏳ 同步中...";
+    syncEl.style.color = "#D97706";
+  }
   currentProject.updatedAt = Date.now();
   const slimPages = (currentProject.pages || []).map(p => {
     if (p.sitePhotoUrl) memoryPhotoCache.set(p.id, p.sitePhotoUrl);
@@ -903,6 +1067,10 @@ async function saveCurrentProject() {
   });
   await setDoc(doc(db, PROJ_COL, currentProject.id), { ...currentProject, pages: slimPages });
   upsertLocalProject(currentProject);
+  if (syncEl) {
+    syncEl.textContent = "☁️ 已自動儲存";
+    syncEl.style.color = "#059669";
+  }
 }
 
 function getSpaceRank(sp) {
@@ -921,6 +1089,7 @@ function renderWorkspace() {
 }
 
 function renderOverview() {
+  const myGen = ++overviewRenderGeneration;
   const pages = currentProject.pages || [];
   const displayTitle = cleanProjectTitle(currentProject.name);
   const contacts = Array.isArray(currentProject.contacts) ? currentProject.contacts : [];
@@ -983,7 +1152,7 @@ function renderOverview() {
       <div id="project-review-list" style="display:flex; flex-direction:column; gap:5px; font-size:12px;"></div>
     </div>
 
-    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 8px; background:#FFF; border:1px solid #E2E8F0; border-radius:999px; margin-bottom:8px; overflow-x:auto; white-space:nowrap;">
+    <div style="display:flex; align-items:center; justify-content:flex-start; gap:8px; padding:4px 8px; background:#FFF; border:1px solid #E2E8F0; border-radius:999px; margin-bottom:8px; overflow-x:auto; white-space:nowrap;">
       <div style="display:flex; align-items:center; gap:4px;">
         <button id="btn-space-sort-toggle" title="調整空間先後次序"
                 style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:999px; padding:2px 7px; font-size:11px; font-weight:800; color:#334155; cursor:pointer;">
@@ -991,9 +1160,13 @@ function renderOverview() {
         </button>
         <button class="slim-chip ${filterSpace === "ALL" ? "active" : ""}" data-fsp="ALL">全部空間</button>
         ${allSpaces.map(sp => `<button class="slim-chip ${filterSpace === sp ? "active" : ""}" data-fsp="${sp}">${sp}</button>`).join("")}
+        <button id="btn-preset-space-gear" title="加減預設空間清單"
+                style="background:#F8FAFC; border:1px solid #CBD5E1; border-radius:999px; width:24px; height:24px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">
+          ⚙️
+        </button>
       </div>
 
-      <div style="display:flex; align-items:center; gap:4px; padding-left:6px; border-left:1px solid #E2E8F0;">
+      <div style="display:flex; align-items:center; gap:4px; padding-left:8px; border-left:1.5px solid #CBD5E1;">
         <button class="slim-chip ${filterCategory === "ALL" ? "active" : ""}" data-fcat="ALL">全部(${pages.length})</button>
         ${CORE_CATEGORIES.map(cat => `<button class="slim-chip ${filterCategory === cat ? "active" : ""}" data-fcat="${cat}">${cat}(${catCounts[cat] || 0})</button>`).join("")}
       </div>
@@ -1016,12 +1189,15 @@ function renderOverview() {
     </div>
 
     <div id="dict-picker-box" class="card ${pages.length === 0 ? "" : "hidden"}" style="margin-bottom:8px;">
-      <div class="section-title">第一步：選擇空間</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <div class="section-title" style="margin:0;">第一步：點選空間</div>
+        <button id="btn-picker-manage-sp" class="btn-outline btn-sm" style="font-size:11px;">⚙️ 加減預設空間</button>
+      </div>
       <div class="chip-grid" id="picker-spaces" style="margin-bottom:8px;"></div>
       <div class="section-title">第二步：選擇訂造櫃體（選填）</div>
       <div class="chip-grid" id="picker-cabs" style="margin-bottom:10px;"></div>
       <div style="display:flex; gap:6px; flex-wrap:wrap;">
-        <input type="text" id="custom-page-title" placeholder="空間名稱（如：玄關、主人房）" style="flex:1; min-width:160px; padding:5px 8px; border:1px solid #111827; border-radius:4px; font-size:13px;" />
+        <input type="text" id="custom-page-title" placeholder="或直接輸入空間名稱" style="flex:1; min-width:160px; padding:5px 8px; border:1px solid #111827; border-radius:4px; font-size:13px;" />
         <select id="new-page-doctype" style="padding:5px 8px; border:1px solid #111827; border-radius:4px; font-size:13px; font-weight:700;">
           <option value="度尺圖">度尺圖</option>
           <option value="平面圖">平面圖</option>
@@ -1046,32 +1222,14 @@ function renderOverview() {
   document.getElementById("btn-back-list").onclick = () => renderProjectList();
   document.getElementById("btn-add-space").onclick = () => document.getElementById("dict-picker-box").classList.toggle("hidden");
   document.getElementById("btn-cloud-dict-open").onclick = () => openCloudDictModal("STAMP");
+  document.getElementById("btn-preset-space-gear").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
+  document.getElementById("btn-picker-manage-sp").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
 
   document.getElementById("btn-overview-contact").onclick = () => document.getElementById("overview-contact-box").classList.toggle("hidden");
-  const ovBox = document.getElementById("overview-contact-box");
-  if (ovBox) {
-    ovBox.querySelectorAll(".btn-contact-close").forEach(b => b.onclick = () => ovBox.classList.add("hidden"));
-    ovBox.querySelectorAll(".btn-ct-add").forEach(b => {
-      b.onclick = async () => {
-        const nameVal = (document.getElementById(`ct-name-${currentProject.id}`)?.value || "").trim();
-        const phoneVal = (document.getElementById(`ct-phone-${currentProject.id}`)?.value || "").trim();
-        if (!nameVal && !phoneVal) return;
-        if (!Array.isArray(currentProject.contacts)) currentProject.contacts = [];
-        currentProject.contacts.push({ name: nameVal || "聯絡記錄", phone: phoneVal });
-        await saveCurrentProject();
-        renderOverview();
-        document.getElementById("overview-contact-box")?.classList.remove("hidden");
-      };
-    });
-    ovBox.querySelectorAll(".btn-ct-del").forEach(b => {
-      b.onclick = async () => {
-        currentProject.contacts.splice(Number(b.dataset.cidx), 1);
-        await saveCurrentProject();
-        renderOverview();
-        document.getElementById("overview-contact-box")?.classList.remove("hidden");
-      };
-    });
-  }
+  bindContactEvents([currentProject], () => {
+    renderOverview();
+    document.getElementById("overview-contact-box")?.classList.remove("hidden");
+  });
 
   document.getElementById("btn-overview-rename").onclick = async () => {
     const nextName = prompt("修改工程名稱：", cleanProjectTitle(currentProject.name));
@@ -1118,10 +1276,10 @@ function renderOverview() {
   root.querySelectorAll("[data-fcat]").forEach(btn => { btn.onclick = () => { filterCategory = btn.dataset.fcat; renderOverview(); }; });
 
   setupDictPicker();
-  renderFlatExpandedGallery(document.getElementById("main-gallery-host"), sortedGroups, pages, allSpaces);
+  renderFlatExpandedGallery(document.getElementById("main-gallery-host"), sortedGroups, pages, allSpaces, myGen);
 }
 
-function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces) {
+function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, renderGen) {
   let pendingReplaceSpace = null;
   const replaceInput = document.getElementById("quick-replace-measure-input");
 
@@ -1182,20 +1340,22 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces) {
               return `
                 <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; overflow:hidden; display:flex; flex-direction:column;">
                   <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 8px; background:#FFF; border-bottom:1px solid #F1F5F9; font-size:12px; gap:4px;">
-                    <strong style="color:#1E293B; cursor:pointer;" data-open-idx="${realIdx}">${p.pageNum || `P${realIdx + 1}`} · ${cat}</strong>
+                    <div style="display:flex; align-items:center; gap:4px;">
+                      <strong style="color:#1E293B; cursor:pointer;" data-open-idx="${realIdx}">${p.pageNum || `P${realIdx + 1}`}</strong>
+                      <span style="color:#94A3B8;">·</span>
+                      <button type="button" class="btn-card-cat-tap" data-pidx="${realIdx}" title="點擊點選改分類或空間"
+                              style="background:#EFF6FF; color:#1D4ED8; border:1px solid #BFDBFE; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:800; cursor:pointer;">
+                        ${cat}
+                      </button>
+                    </div>
                     <div style="display:flex; align-items:center; gap:4px;">
                       ${annCnt > 0 ? `<span style="font-size:10px; background:#EFF6FF; color:#1D4ED8; padding:1px 5px; border-radius:4px; font-weight:700;">📐${annCnt}</span>` : ""}
-                      <button class="btn-card-move-space" data-pidx="${realIdx}" title="改空間或改分類"
-                              style="background:#F1F5F9; border:1px solid #CBD5E1; border-radius:4px; padding:1px 5px; font-size:10px; color:#334155; cursor:pointer;">🏷️ 改區</button>
                     </div>
                   </div>
-                  <div data-open-idx="${realIdx}" style="height:165px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
+                  <div id="thumb-slot-${p.id}" data-open-idx="${realIdx}" style="height:165px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
                     ${cachedUrl
                       ? `<img src="${cachedUrl}" style="width:100%; height:100%; object-fit:contain;" />`
-                      : `<div style="text-align:center; color:#64748B; font-size:12px;">
-                           <div>點擊開啟「${cat}」</div>
-                           <div style="font-size:10px; color:#94A3B8; margin-top:2px;">按需單頁載入</div>
-                         </div>`}
+                      : `<div style="text-align:center; color:#94A3B8; font-size:11px;">載入縮圖中...</div>`}
                   </div>
                 </div>
               `;
@@ -1210,13 +1370,12 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces) {
     el.onclick = () => { activePageIdx = Number(el.dataset.openIdx); renderWorkspace(); };
   });
 
-  host.querySelectorAll(".btn-card-move-space").forEach(btn => {
-    btn.onclick = async (e) => {
+  host.querySelectorAll(".btn-card-cat-tap").forEach(btn => {
+    btn.onclick = (e) => {
       e.stopPropagation();
       const pg = allPages[Number(btn.dataset.pidx)];
       if (!pg) return;
-      await promptChangePageSpaceOrCat(pg, allSpaces);
-      renderOverview();
+      openQuickReassignModal(pg, allSpaces, () => renderOverview());
     };
   });
 
@@ -1227,21 +1386,25 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces) {
   host.querySelectorAll(".btn-quick-compare").forEach(btn => {
     btn.onclick = (e) => { e.stopPropagation(); compareSpaceName = btn.dataset.cspace; renderWorkspace(); };
   });
-}
 
-async function promptChangePageSpaceOrCat(page, existingSpaces = []) {
-  const hint = existingSpaces.filter(s => s && s !== "未標空間").join(" / ");
-  const nextSp = prompt(`輸入要移去的新空間名稱（現有：${hint}）：`, page.space || "");
-  if (nextSp !== null && nextSp.trim()) {
-    page.space = nextSp.trim();
-  }
-  const curCat = normalizePageCategory(page);
-  const nextCat = prompt(`輸入圖紙分類（度尺圖 / 平面圖 / 繪圖 / 效果圖）：`, curCat);
-  if (nextCat !== null && CORE_CATEGORIES.includes(nextCat.trim())) {
-    page.docTypeLabel = nextCat.trim();
-  }
-  page.title = `${page.space} · ${normalizePageCategory(page)}`;
-  await saveCurrentProject();
+  const visiblePagesToLoad = sortedGroups.flatMap(([, items]) => items).filter(p => !(p.sitePhotoUrl || memoryPhotoCache.get(p.id)));
+  (async () => {
+    const batchSize = 6;
+    for (let i = 0; i < visiblePagesToLoad.length; i += batchSize) {
+      if (renderGen !== overviewRenderGeneration || activePageIdx >= 0 || compareSpaceName) return;
+      const chunk = visiblePagesToLoad.slice(i, i + batchSize);
+      await Promise.all(chunk.map(async (pg) => {
+        const url = await ensureSinglePagePhoto(currentProject, pg);
+        if (renderGen !== overviewRenderGeneration) return;
+        const slot = document.getElementById(`thumb-slot-${pg.id}`);
+        if (slot) {
+          slot.innerHTML = url
+            ? `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />`
+            : `<div style="text-align:center; color:#64748B; font-size:11px;">點擊開啟「${normalizePageCategory(pg)}」</div>`;
+        }
+      }));
+    }
+  })();
 }
 
 async function renderSideBySideCompare(spaceName) {
@@ -1276,7 +1439,7 @@ async function renderSideBySideCompare(spaceName) {
             <button id="btn-cmp-edit-left" style="background:#16A34A; color:#FFF; border:none; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:700; cursor:pointer;">✏️ 全屏批改左圖</button>
           </div>
           <div id="cmp-left-body" style="flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; padding:6px;">
-            <span style="color:#94A3B8; font-size:12px;">按需載入左圖中...</span>
+            <span style="color:#94A3B8; font-size:12px;">載入左圖中...</span>
           </div>
         </div>
 
@@ -1286,7 +1449,7 @@ async function renderSideBySideCompare(spaceName) {
             <button id="btn-cmp-edit-right" style="background:#2563EB; color:#FFF; border:none; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:700; cursor:pointer;">✏️ 全屏批改右圖</button>
           </div>
           <div id="cmp-right-body" style="flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; padding:6px;">
-            <span style="color:#94A3B8; font-size:12px;">按需載入右圖中...</span>
+            <span style="color:#94A3B8; font-size:12px;">載入右圖中...</span>
           </div>
         </div>
       </div>
@@ -1367,11 +1530,10 @@ function setupDictPicker() {
   if (!titleInput) return;
 
   const updateTitle = () => { titleInput.value = [selSpace, selCab].filter(Boolean).join("-"); };
-  const spaceItems = masterDict.spaceGroups.flatMap(g => g.items);
-  const cabItems = masterDict.cabinetGroups.flatMap(g => g.items);
+  const cabItems = masterDict?.cabinetGroups?.flatMap(g => g.items) || [];
 
-  document.getElementById("picker-spaces").innerHTML = spaceItems.map(i =>
-    `<button type="button" class="chip ${i.pinned ? "chip-pinned" : ""}" data-sp="${i.name}">${i.name}</button>`
+  document.getElementById("picker-spaces").innerHTML = cloudPresetSpaces.map(spName =>
+    `<button type="button" class="chip" data-sp="${spName}">${spName}</button>`
   ).join("");
   document.getElementById("picker-cabs").innerHTML = cabItems.map(i =>
     `<button type="button" class="chip ${i.pinned ? "chip-pinned" : ""}" data-cb="${i.name}">${i.name}</button>`
@@ -1421,7 +1583,9 @@ function createBlankWhiteDataUrl() {
 async function renderSinglePageEditor(page) {
   const totalPages = currentProject.pages.length;
   const catLabel = normalizePageCategory(page);
-  const allSpaces = [...new Set((currentProject.pages || []).map(p => p.space || "未標空間"))];
+  const currentSpace = page.space || "未標空間";
+  const allSpaces = [...new Set([...(currentProject.pages || []).map(p => p.space || "未標空間"), ...cloudPresetSpaces])].filter(Boolean);
+  const sameSpacePages = (currentProject.pages || []).filter(p => (p.space || "未標空間") === currentSpace);
   if (!Array.isArray(page.reviewLogs)) page.reviewLogs = [];
 
   const rawColors = Array.isArray(masterDict?.rulerColors) ? masterDict.rulerColors : [];
@@ -1436,13 +1600,17 @@ async function renderSinglePageEditor(page) {
           <strong style="font-size:13px; color:#0F172A;">${page.pageNum || `P${activePageIdx + 1}`}</strong>
 
           <select id="ed-space-sel" title="更改所屬空間" style="padding:3px 5px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; color:#0F172A; background:#F8FAFC;">
-            ${allSpaces.map(sp => `<option value="${sp}" ${sp === (page.space || "未標空間") ? "selected" : ""}>${sp}</option>`).join("")}
-            <option value="__NEW__">+ 新空間...</option>
+            ${allSpaces.map(sp => `<option value="${sp}" ${sp === currentSpace ? "selected" : ""}>${sp}</option>`).join("")}
           </select>
           <select id="ed-cat-sel" title="更改圖紙分類" style="padding:3px 5px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px; font-weight:700; color:#1D4ED8; background:#EFF6FF;">
             ${CORE_CATEGORIES.map(c => `<option value="${c}" ${c === catLabel ? "selected" : ""}>${c}</option>`).join("")}
           </select>
           <span style="font-size:11px; color:#64748B;">(${activePageIdx + 1}/${totalPages})</span>
+
+          <button type="button" id="btn-toggle-space-strip"
+                  style="background:#F1F5F9; color:#0F172A; border:1px solid #CBD5E1; border-radius:6px; padding:3px 8px; font-size:11px; font-weight:800; cursor:pointer;">
+            🗂️ 本區圖集 (${sameSpacePages.length}) ▾
+          </button>
         </div>
 
         <div style="display:flex; align-items:center; gap:5px; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:999px; padding:2px 8px;">
@@ -1470,7 +1638,7 @@ async function renderSinglePageEditor(page) {
           <button id="btn-page-review-drawer" style="background:#FFF; color:#991B1B; border:1px solid #FECACA; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:800; cursor:pointer;">
             📝 記錄 (${page.reviewLogs.length})
           </button>
-          <button id="btn-manual-save" style="background:#059669; color:#FFF; border:none; border-radius:6px; padding:4px 9px; font-size:12px; font-weight:800; cursor:pointer;">💾 儲存</button>
+          <span id="top-auto-save-status" style="font-size:11px; font-weight:800; color:#059669; background:#ECFDF5; border:1px solid #A7F3D0; border-radius:999px; padding:3px 8px; white-space:nowrap;">☁️ 已自動儲存</span>
           <label style="background:#F1F5F9; color:#334155; border:1px solid #CBD5E1; border-radius:6px; padding:4px 7px; font-size:12px; font-weight:700; cursor:pointer;">
             📷 換底圖
             <input type="file" id="up-site-photo" accept="image/*" class="hidden" />
@@ -1478,32 +1646,53 @@ async function renderSinglePageEditor(page) {
         </div>
       </div>
 
-      <div id="page-review-drawer" class="hidden" style="position:absolute; right:12px; top:44px; width:min(360px, 94vw); max-height:78vh; overflow-y:auto; background:#FFFFFF; color:#0F172A; border:1.5px solid #CBD5E1; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(15,23,42,0.18); z-index:40; display:flex; flex-direction:column; gap:8px;">
+      <div id="ed-space-strip-drawer" class="hidden" style="background:rgba(255,255,255,0.96); border-bottom:1px solid #CBD5E1; padding:6px 10px; display:flex; align-items:center; gap:8px; overflow-x:auto; z-index:25; box-shadow:0 6px 16px rgba(15,23,42,0.08);">
+        ${sameSpacePages.map(spPg => {
+          const globalIdx = currentProject.pages.indexOf(spPg);
+          const isCur = spPg === page;
+          const cached = spPg.sitePhotoUrl || memoryPhotoCache.get(spPg.id) || "";
+          return `
+            <div class="strip-thumb-card" data-jump-idx="${globalIdx}"
+                 style="flex-shrink:0; width:96px; border:2px solid ${isCur ? "#2563EB" : "#CBD5E1"}; border-radius:7px; background:${isCur ? "#EFF6FF" : "#F8FAFC"}; overflow:hidden; cursor:pointer;">
+              <div style="font-size:10px; font-weight:800; padding:2px 5px; color:${isCur ? "#1D4ED8" : "#334155"}; background:#FFF; border-bottom:1px solid #E2E8F0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                ${spPg.pageNum || `P${globalIdx + 1}`} · ${normalizePageCategory(spPg)}
+              </div>
+              <div id="strip-img-${spPg.id}" style="height:56px; display:flex; align-items:center; justify-content:center; font-size:10px; color:#94A3B8;">
+                ${cached ? `<img src="${cached}" style="width:100%; height:100%; object-fit:contain;" />` : `載入中`}
+              </div>
+            </div>
+          `;
+        }).join("")}
+        <button type="button" id="btn-close-space-strip" style="flex-shrink:0; background:#F1F5F9; border:1px solid #CBD5E1; border-radius:6px; padding:4px 8px; font-size:11px; color:#475569; cursor:pointer;">收起 ▴</button>
+      </div>
+
+      <!-- 全屏拉高版「📝 本頁審圖批改記錄」抽屜面板 -->
+      <div id="page-review-drawer" class="hidden" style="position:absolute; right:10px; top:42px; bottom:10px; width:min(410px, 95vw); height:calc(100vh - 54px); background:#FFFFFF; color:#0F172A; border:1.5px solid #CBD5E1; border-radius:10px; padding:10px; box-shadow:0 12px 28px rgba(15,23,42,0.22); z-index:40; display:flex; flex-direction:column; gap:7px;">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #E2E8F0; padding-bottom:5px;">
-          <strong style="font-size:13px; color:#0F172A;">📝 本頁審圖批改記錄</strong>
-          <button id="btn-close-page-rev" style="background:none; border:none; color:#64748B; font-size:14px; cursor:pointer;">✕</button>
+          <strong style="font-size:14px; color:#0F172A;">📝 本頁審圖批改記錄</strong>
+          <button id="btn-close-page-rev" style="background:none; border:none; color:#64748B; font-size:15px; cursor:pointer;">✕</button>
         </div>
 
         <div style="display:flex; gap:5px; align-items:center;">
-          <select id="new-rev-status" style="padding:4px 6px; border-radius:5px; border:1px solid #CBD5E1; font-size:12px; font-weight:700;">
-            <option value="NEED_FIX">❌ 需修改</option>
-            <option value="SITE_CHECK">⚠️ 現場核對</option>
+          <select id="new-rev-status" style="padding:4px 7px; border-radius:5px; border:1px solid #CBD5E1; font-size:12px; font-weight:700;">
+            <option value="NEED_FIX">❌ 需改</option>
+            <option value="SITE_CHECK">⚠️ 再核對</option>
             <option value="NEED_INFO">📌 待補資料</option>
-            <option value="OK">✅ 確認無誤</option>
+            <option value="OK">✅ 確認</option>
           </select>
-          <button id="btn-drawer-cloud-dict" style="margin-left:auto; background:#EFF6FF; border:1px solid #93C5FD; border-radius:5px; padding:3px 7px; font-size:11px; font-weight:700; color:#1D4ED8; cursor:pointer;">⚙️ 管理雲端詞庫</button>
+          <button id="btn-drawer-cloud-dict" style="margin-left:auto; background:#EFF6FF; border:1px solid #93C5FD; border-radius:5px; padding:3px 8px; font-size:11px; font-weight:700; color:#1D4ED8; cursor:pointer;">⚙️ 管理雲端詞庫</button>
         </div>
 
         <textarea id="new-rev-note" rows="2" placeholder="輸入批改要求，或點下方雲端短語一鍵帶入..."
-                  style="width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1.5px solid #93C5FD; font-size:13px; resize:vertical; font-family:inherit;"></textarea>
+                  style="width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1.5px solid #93C5FD; font-size:12px; resize:none; font-family:inherit;"></textarea>
 
-        <div id="drawer-phrase-chips" style="display:flex; flex-wrap:wrap; gap:4px; max-height:90px; overflow-y:auto;"></div>
+        <div id="drawer-phrase-chips" style="display:flex; flex-wrap:wrap; gap:4px; max-height:175px; overflow-y:auto; background:#F8FAFC; padding:5px; border-radius:6px; border:1px solid #E2E8F0;"></div>
 
-        <button id="btn-add-rev-note" style="background:#2563EB; color:#FFF; border:none; border-radius:6px; padding:6px 10px; font-size:12px; font-weight:800; cursor:pointer;">
+        <button id="btn-add-rev-note" style="background:#2563EB; color:#FFF; border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:800; cursor:pointer;">
           + 新增批改記錄
         </button>
 
-        <div id="page-rev-items" style="display:flex; flex-direction:column; gap:5px; font-size:12px;"></div>
+        <div id="page-rev-items" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:5px; font-size:12px; border-top:1px solid #E2E8F0; padding-top:6px;"></div>
       </div>
 
       <div id="sub-module-host" style="flex:1; width:100%; height:100%; position:relative; overflow:hidden; background:#F8FAFC;">
@@ -1511,6 +1700,32 @@ async function renderSinglePageEditor(page) {
       </div>
     </div>
   `;
+
+  const stripToggleBtn = document.getElementById("btn-toggle-space-strip");
+  const stripDrawer = document.getElementById("ed-space-strip-drawer");
+  stripToggleBtn.onclick = async () => {
+    const willOpen = stripDrawer.classList.contains("hidden");
+    stripDrawer.classList.toggle("hidden");
+    stripToggleBtn.textContent = willOpen ? `🗂️ 本區圖集 (${sameSpacePages.length}) ▴` : `🗂️ 本區圖集 (${sameSpacePages.length}) ▾`;
+    if (willOpen) {
+      for (const spPg of sameSpacePages) {
+        const url = await ensureSinglePagePhoto(currentProject, spPg);
+        const box = document.getElementById(`strip-img-${spPg.id}`);
+        if (box) box.innerHTML = url ? `<img src="${url}" style="width:100%; height:100%; object-fit:contain;" />` : `無圖`;
+      }
+    }
+  };
+  document.getElementById("btn-close-space-strip").onclick = () => {
+    stripDrawer.classList.add("hidden");
+    stripToggleBtn.textContent = `🗂️ 本區圖集 (${sameSpacePages.length}) ▾`;
+  };
+  stripDrawer.querySelectorAll(".strip-thumb-card").forEach(card => {
+    card.onclick = () => {
+      const targetIdx = Number(card.dataset.jumpIdx);
+      if (targetIdx === activePageIdx) return;
+      saveAndRun(() => { activePageIdx = targetIdx; renderWorkspace(); });
+    };
+  });
 
   const topArrowBtn = document.getElementById("btn-top-arrow-mode");
   topArrowBtn.onclick = () => {
@@ -1537,7 +1752,7 @@ async function renderSinglePageEditor(page) {
     if (activeCanvasInstance) activeCanvasInstance.setStrokeWidth(v);
   };
   topStrokeSlider.onchange = () => {
-    if (activeCanvasInstance && activeCanvasInstance.selectedItem) activeCanvasInstance.emitSave();
+    if (activeCanvasInstance && activeCanvasInstance.selectedItems.length) activeCanvasInstance.emitSave();
   };
 
   document.getElementById("btn-top-reset-zoom").onclick = () => {
@@ -1545,22 +1760,10 @@ async function renderSinglePageEditor(page) {
   };
 
   document.getElementById("ed-space-sel").onchange = async (e) => {
-    const val = e.target.value;
-    if (val === "__NEW__") {
-      const custom = prompt("輸入新空間名稱：");
-      if (custom && custom.trim()) {
-        page.space = custom.trim();
-        page.title = `${page.space} · ${normalizePageCategory(page)}`;
-        await saveCurrentProject();
-        renderSinglePageEditor(page);
-      } else {
-        e.target.value = page.space || "未標空間";
-      }
-      return;
-    }
-    page.space = val;
+    page.space = e.target.value;
     page.title = `${page.space} · ${normalizePageCategory(page)}`;
     await saveCurrentProject();
+    renderSinglePageEditor(page);
   };
 
   document.getElementById("ed-cat-sel").onchange = async (e) => {
@@ -1572,9 +1775,9 @@ async function renderSinglePageEditor(page) {
   const renderDrawerPhrases = () => {
     const box = document.getElementById("drawer-phrase-chips");
     if (!box) return;
-    box.innerHTML = cloudPhraseBank.slice(0, 18).map(p => `
+    box.innerHTML = cloudPhraseBank.slice(0, 24).map(p => `
       <button type="button" class="drw-phrase-chip" data-ptext="${p.text.replace(/"/g, "&quot;")}"
-              style="background:#F8FAFC; border:1px solid #CBD5E1; border-radius:4px; padding:2px 6px; font-size:11px; color:#334155; cursor:pointer;">
+              style="background:#FFF; border:1px solid #CBD5E1; border-radius:4px; padding:3px 7px; font-size:11px; color:#334155; cursor:pointer; text-align:left;">
         ${p.text}
       </button>
     `).join("") || `<span style="font-size:11px; color:#94A3B8;">雲端尚無短語，點上方「⚙️ 管理雲端詞庫」新增或匯入範本。</span>`;
@@ -1596,7 +1799,7 @@ async function renderSinglePageEditor(page) {
     if (badgeBtn) badgeBtn.textContent = `📝 記錄 (${page.reviewLogs.length})`;
     if (!listEl) return;
     if (!page.reviewLogs.length) {
-      listEl.innerHTML = `<div style="color:#94A3B8; font-size:11px;">尚無批改記錄，可使用頂部「↗ 箭頭批改」拉線即打字或在上方輸入。</div>`;
+      listEl.innerHTML = `<div style="color:#94A3B8; font-size:11px;">尚無批改記錄，可使用頂部「↗ 箭頭批改」拉線打字或在上方輸入。</div>`;
       return;
     }
     listEl.innerHTML = page.reviewLogs.map((r, i) => {
@@ -1663,15 +1866,6 @@ async function renderSinglePageEditor(page) {
       activePageIdx = -1;
       renderWorkspace();
     });
-  };
-
-  const saveBtn = document.getElementById("btn-manual-save");
-  saveBtn.onclick = async () => {
-    if (activeCanvasInstance) activeCanvasInstance.commitInline(true);
-    saveBtn.textContent = "儲存中...";
-    await saveCurrentProject();
-    saveBtn.textContent = "✅ 已儲存";
-    setTimeout(() => { saveBtn.textContent = "💾 儲存"; }, 1400);
   };
 
   const host = document.getElementById("sub-module-host");
