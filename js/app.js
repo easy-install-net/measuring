@@ -868,6 +868,79 @@ async function createAndOpenNewPage(spaceName, options = {}) {
   renderWorkspace();
 }
 
+function shrinkDataUrlForCloud(dataUrl) {
+  return new Promise((resolve) => {
+    if (!dataUrl || dataUrl.length < 750000) {
+      resolve(dataUrl);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const sc = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * sc);
+      c.height = Math.round(img.height * sc);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", 0.72));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+async function backupAndSyncProjectToCloud(proj, onProgress = null) {
+  if (!proj || !Array.isArray(proj.pages)) return { synced: 0, total: 0 };
+  const targetPages = proj.pages;
+  await idbSaveProject(proj);
+  let syncedCloudCnt = 0;
+
+  for (let i = 0; i < targetPages.length; i++) {
+    const pg = targetPages[i];
+    if (onProgress) onProgress(i + 1, targetPages.length, pg);
+    const rawUrl = await ensureSinglePagePhoto(proj, pg);
+    if (rawUrl) {
+      const safeUrl = await shrinkDataUrlForCloud(rawUrl);
+      pg.sitePhotoUrl = safeUrl;
+      memoryPhotoCache.set(pg.id, safeUrl);
+      const refId = pg.mediaRefId || `M_${proj.id}_${pg.id}`;
+      pg.mediaRefId = refId;
+      await idbSaveMedia(refId, safeUrl, { projectId: proj.id, pageId: pg.id });
+
+      const mediaPayload = {
+        projectId: proj.id,
+        pageId: pg.id,
+        imageData: safeUrl,
+        updatedAt: Date.now()
+      };
+
+      if (navigator.onLine) {
+        try {
+          await setDoc(doc(db, MEDIA_COL, String(refId)), mediaPayload);
+          syncedCloudCnt++;
+        } catch (_) {
+          await idbEnqueueSync({ type: "MEDIA", targetId: String(refId), payload: mediaPayload });
+        }
+      } else {
+        await idbEnqueueSync({ type: "MEDIA", targetId: String(refId), payload: mediaPayload });
+      }
+    }
+  }
+
+  const slimPages = targetPages.map(pg => ({ ...pg, sitePhotoUrl: "" }));
+  const projPayload = { ...proj, pages: slimPages, updatedAt: Date.now() };
+  upsertLocalProject(proj);
+
+  if (navigator.onLine) {
+    await setDoc(doc(db, PROJ_COL, proj.id), projPayload).catch(() =>
+      idbEnqueueSync({ type: "PROJECT", targetId: proj.id, payload: projPayload })
+    );
+  } else {
+    await idbEnqueueSync({ type: "PROJECT", targetId: proj.id, payload: projPayload });
+  }
+
+  return { synced: syncedCloudCnt, total: targetPages.length };
+}
+
 window.history.pushState({ measuringGuard: true }, "");
 window.addEventListener("popstate", () => {
   window.history.pushState({ measuringGuard: true }, "");
@@ -876,7 +949,16 @@ window.addEventListener("popstate", () => {
     if (activeCanvasInstance) activeCanvasInstance.commitInline(false);
     saveCurrentProject().finally(() => { activePageIdx = -1; renderWorkspace(); });
   } else if (currentProject) {
-    if (confirm("確定要離開目前工程返回工程目錄嗎？")) { currentProject = null; renderProjectList(); }
+    if (confirm("確定要離開目前工程返回工程目錄嗎？")) {
+      const leavingProj = currentProject;
+      currentProject = null;
+      renderProjectList();
+      backupAndSyncProjectToCloud(leavingProj, (cur, tot) => {
+        updateNetworkBanner(`🔄 背景備份並上雲 (${cur}/${tot})...`);
+      }).then((res) => {
+        updateNetworkBanner(`✅ 已自動備份並上雲 (${res.synced}/${res.total}張)`);
+      });
+    }
   }
 });
 
@@ -1671,7 +1753,7 @@ function renderOverview() {
       <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
         <button id="btn-batch-upload-base" class="btn-solid btn-sm" style="background:#2563EB; border-color:#2563EB;">📤 批量上底圖</button>
         <button id="btn-quick-new-blank" class="btn-outline btn-sm" style="color:#0F172A; font-weight:800;">📄 插白紙</button>
-        <button id="btn-offline-cache-all" class="btn-outline btn-sm" style="color:#059669; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">📥 離線備份圖庫</button>
+        <button id="btn-offline-cache-all" class="btn-outline btn-sm" style="color:#059669; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">☁️ 備份並上雲</button>
         <button id="btn-cloud-dict-open" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">⚙️ 雲端詞庫</button>
         <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#FCA5A5; color:#DC2626; font-weight:700;">
           📋 批改總表${fixTotal > 0 ? ` (${fixTotal})` : ""}
@@ -1758,7 +1840,19 @@ function renderOverview() {
     </style>
   `;
 
-  document.getElementById("btn-back-list").onclick = () => renderProjectList();
+  document.getElementById("btn-back-list").onclick = () => {
+    const leavingProj = currentProject;
+    currentProject = null;
+    renderProjectList();
+    if (leavingProj && (leavingProj.pages || []).length > 0) {
+      backupAndSyncProjectToCloud(leavingProj, (cur, tot) => {
+        updateNetworkBanner(`🔄 返回目錄自動備份並上雲 (${cur}/${tot})...`);
+      }).then((res) => {
+        updateNetworkBanner(`✅ 已自動備份並上雲 (${res.synced}/${res.total}張)`);
+      });
+    }
+  };
+
   document.getElementById("btn-add-space").onclick = () => document.getElementById("dict-picker-box").classList.toggle("hidden");
   document.getElementById("btn-cloud-dict-open").onclick = () => openCloudDictModal("STAMP");
   document.getElementById("btn-preset-space-gear").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
@@ -1773,49 +1867,14 @@ function renderOverview() {
     createAndOpenNewPage(targetSp, { docType: "度尺圖", withWhitePaper: true });
   };
 
-document.getElementById("btn-offline-cache-all").onclick = async () => {
+  document.getElementById("btn-offline-cache-all").onclick = async () => {
     const btn = document.getElementById("btn-offline-cache-all");
     btn.disabled = true;
-    await idbSaveProject(currentProject);
-    let syncedCloudCnt = 0;
-
-    const shrinkIfNeeded = (dataUrl) => new Promise((resolve) => {
-      if (!dataUrl || dataUrl.length < 750000) { resolve(dataUrl); return; }
-      const img = new Image();
-      img.onload = () => {
-        const sc = Math.min(1, 1280 / Math.max(img.width, img.height));
-        const c = document.createElement("canvas");
-        c.width = Math.round(img.width * sc);
-        c.height = Math.round(img.height * sc);
-        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-        resolve(c.toDataURL("image/jpeg", 0.72));
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
+    const res = await backupAndSyncProjectToCloud(currentProject, (cur, tot) => {
+      btn.textContent = `⏳ 備份並上雲 (${cur}/${tot})...`;
     });
-
-    for (let i = 0; i < pages.length; i++) {
-      const pg = pages[i];
-      btn.textContent = `⏳ 備份並上雲 (${i + 1}/${pages.length})...`;
-      const rawUrl = await ensureSinglePagePhoto(currentProject, pg);
-      if (rawUrl && navigator.onLine) {
-        const safeUrl = await shrinkIfNeeded(rawUrl);
-        pg.sitePhotoUrl = safeUrl;
-        memoryPhotoCache.set(pg.id, safeUrl);
-        const refId = pg.mediaRefId || `M_${currentProject.id}_${pg.id}`;
-        pg.mediaRefId = refId;
-        await idbSaveMedia(refId, safeUrl, { projectId: currentProject.id, pageId: pg.id });
-        await setDoc(doc(db, MEDIA_COL, String(refId)), {
-          projectId: currentProject.id,
-          pageId: pg.id,
-          imageData: safeUrl,
-          updatedAt: Date.now()
-        }).then(() => { syncedCloudCnt++; }).catch(() => {});
-      }
-    }
-    await saveCurrentProject();
     btn.disabled = false;
-    btn.textContent = `✅ 已備份並上雲 (${syncedCloudCnt}/${pages.length}張)`;
+    btn.textContent = `✅ 已備份並上雲 (${res.synced}/${res.total}張)`;
   };
 
   document.getElementById("btn-overview-contact").onclick = () => document.getElementById("overview-contact-box").classList.toggle("hidden");
@@ -1844,9 +1903,6 @@ document.getElementById("btn-offline-cache-all").onclick = async () => {
     board.classList.toggle("hidden");
     if (!board.classList.contains("hidden")) renderProjectReviewList();
   };
-
-
-  
   document.getElementById("btn-close-review-board").onclick = () => document.getElementById("project-review-board").classList.add("hidden");
 
   document.getElementById("btn-space-sort-toggle").onclick = () => document.getElementById("space-sort-drawer").classList.toggle("hidden");
