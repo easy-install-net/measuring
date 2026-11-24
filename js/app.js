@@ -314,7 +314,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
           await saveCloudDictionaryToDB();
           renderModalContent();
         };
-      });
+
       bodyEl.querySelectorAll(".cdm-del-group").forEach(b => {
         b.onclick = async () => {
           cloudStampGroups.splice(Number(b.dataset.gidx), 1);
