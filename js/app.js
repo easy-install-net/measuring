@@ -3,6 +3,11 @@ import { db, COLLECTIONS } from "./config/firebase-init.js";
 import { loadMasterDict } from "./config/master-dict.js";
 import { checkBrowserCompatibility, watchAuth, renderLoginView } from "./core/auth.js";
 import { uploadMediaToCloud } from "./core/image-upload.js";
+import {
+  idbSaveProject, idbGetAllProjects, idbDeleteProject,
+  idbSaveMedia, idbGetMedia, idbSetKV, idbGetKV,
+  idbEnqueueSync, idbGetSyncQueue, idbRemoveSyncTask
+} from "./core/offline-db.js";
 import { MeasureCanvas } from "./modules/measure-canvas.js";
 import { renderReportBuilder, renderPublicShareReportView } from "./modules/report-builder.js";
 
@@ -12,6 +17,7 @@ const SETTINGS_COL = "measuring_settings";
 const CLOUD_DICT_DOC_ID = "measuring_cloud_dictionary_v1";
 const LOCAL_ACTIVE_KEY = "measuring_local_active_projects_v2";
 const HIDDEN_STORAGE_KEY = "measuring_hidden_proj_ids";
+const OFFLINE_AUTH_FLAG = "measuring_offline_auth_ok_v1";
 
 const root = document.getElementById("app-root");
 let masterDict = null;
@@ -71,6 +77,58 @@ function applyBrandTitle() {
 }
 applyBrandTitle();
 
+function updateNetworkBanner(extraMsg = "") {
+  let bar = document.getElementById("offline-status-pill");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "offline-status-pill";
+    bar.style.cssText = "position:fixed; bottom:10px; left:10px; z-index:1100; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:800; box-shadow:0 4px 12px rgba(0,0,0,0.18); pointer-events:none; transition:all 0.2s;";
+    document.body.appendChild(bar);
+  }
+  const isOnline = navigator.onLine;
+  if (isOnline) {
+    bar.style.background = "#ECFDF5";
+    bar.style.color = "#065F46";
+    bar.style.border = "1px solid #6EE7B7";
+    bar.textContent = extraMsg || "🟢 線上已連線（離線快取就緒）";
+  } else {
+    bar.style.background = "#FEF3C7";
+    bar.style.color = "#92400E";
+    bar.style.border = "1.5px solid #F59E0B";
+    bar.textContent = extraMsg || "🟠 離線模式中（所有修改與拍照自動存本機）";
+  }
+}
+
+async function flushOfflineSyncQueue() {
+  if (!navigator.onLine) {
+    updateNetworkBanner();
+    return;
+  }
+  const tasks = await idbGetSyncQueue();
+  if (!tasks.length) {
+    updateNetworkBanner();
+    return;
+  }
+  updateNetworkBanner(`🔄 恢復連線，正在背景同步 ${tasks.length} 項離線資料...`);
+  for (const t of tasks) {
+    try {
+      if (t.type === "PROJECT") {
+        await setDoc(doc(db, PROJ_COL, t.targetId), t.payload);
+      } else if (t.type === "MEDIA") {
+        await setDoc(doc(db, MEDIA_COL, t.targetId), t.payload);
+      } else if (t.type === "DICT") {
+        await setDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID), t.payload);
+      }
+      await idbRemoveSyncTask(t.queueId);
+    } catch (_) {}
+  }
+  const remain = await idbGetSyncQueue();
+  updateNetworkBanner(remain.length ? `🟠 尚有 ${remain.length} 項待同步` : "✅ 離線資料已全部同步上雲");
+}
+
+window.addEventListener("online", () => flushOfflineSyncQueue());
+window.addEventListener("offline", () => updateNetworkBanner());
+
 function cleanProjectTitle(name) {
   return String(name || "").replace(/\s*\(\d{5,8}\)\s*/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -97,6 +155,7 @@ function saveLocalProjects(list) {
 
 function upsertLocalProject(proj) {
   if (!proj || !proj.id) return;
+  idbSaveProject(proj).catch(() => {});
   const list = getLocalProjects();
   const cleanSlim = { ...proj, pages: (proj.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" })) };
   const idx = list.findIndex(x => x.id === proj.id);
@@ -106,7 +165,10 @@ function upsertLocalProject(proj) {
   saveLocalProjects(list);
 }
 
-function removeLocalProjectById(pid) { saveLocalProjects(getLocalProjects().filter(x => x.id !== pid)); }
+function removeLocalProjectById(pid) {
+  idbDeleteProject(pid).catch(() => {});
+  saveLocalProjects(getLocalProjects().filter(x => x.id !== pid));
+}
 
 function countProjectAnnotations(proj) {
   let total = 0;
@@ -149,6 +211,18 @@ function dedupProjects(rawProjects) {
 }
 
 async function loadCloudDictionaryFromDB() {
+  const cachedDict = await idbGetKV("cloud_dict");
+  if (cachedDict) {
+    if (Array.isArray(cachedDict.stampGroups)) cloudStampGroups = cachedDict.stampGroups;
+    if (Array.isArray(cachedDict.phraseBank)) cloudPhraseBank = cachedDict.phraseBank;
+    if (Array.isArray(cachedDict.presetSpaces) && cachedDict.presetSpaces.length) cloudPresetSpaces = cachedDict.presetSpaces;
+  }
+  if (!navigator.onLine) {
+    const seed = getSeedTemplatesForDB();
+    if (!cloudStampGroups.length) cloudStampGroups = seed.stampGroups;
+    if (!cloudPhraseBank.length) cloudPhraseBank = seed.phraseBank;
+    return;
+  }
   try {
     const snap = await getDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID));
     if (snap.exists()) {
@@ -167,19 +241,28 @@ async function loadCloudDictionaryFromDB() {
       cloudPhraseBank = seed.phraseBank;
       needAutoSave = true;
     }
-    if (needAutoSave) {
-      await saveCloudDictionaryToDB();
-    }
+    await idbSetKV("cloud_dict", { stampGroups: cloudStampGroups, phraseBank: cloudPhraseBank, presetSpaces: cloudPresetSpaces });
+    if (needAutoSave) await saveCloudDictionaryToDB();
   } catch (_) {}
 }
 
 async function saveCloudDictionaryToDB() {
-  await setDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID), {
+  const payload = {
     stampGroups: cloudStampGroups,
     phraseBank: cloudPhraseBank,
     presetSpaces: cloudPresetSpaces,
     updatedAt: Date.now()
-  });
+  };
+  await idbSetKV("cloud_dict", payload);
+  if (!navigator.onLine) {
+    await idbEnqueueSync({ type: "DICT", targetId: CLOUD_DICT_DOC_ID, payload });
+    return;
+  }
+  try {
+    await setDoc(doc(db, SETTINGS_COL, CLOUD_DICT_DOC_ID), payload);
+  } catch (_) {
+    await idbEnqueueSync({ type: "DICT", targetId: CLOUD_DICT_DOC_ID, payload });
+  }
 }
 
 function getSeedTemplatesForDB() {
@@ -280,7 +363,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
     overlay.querySelector("#cdm-tab-stamp").onclick = () => { activeTab = "STAMP"; renderModalContent(); };
     overlay.querySelector("#cdm-tab-phrase").onclick = () => { activeTab = "PHRASE"; renderModalContent(); };
     overlay.querySelector("#cdm-seed-btn").onclick = async () => {
-      if (!confirm("確定將標準「電掣/水煤/收口詞庫」及「40條審圖短語」寫入 Firebase 雲端資料庫嗎？")) return;
+      if (!confirm("確定將標準「電掣/水煤/收口詞庫」及「40條審圖短語」寫入雲端與本機資料庫嗎？")) return;
       const seed = getSeedTemplatesForDB();
       if (!cloudStampGroups.length) cloudStampGroups = seed.stampGroups;
       if (!cloudPhraseBank.length) cloudPhraseBank = seed.phraseBank;
@@ -323,7 +406,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
         <div style="display:flex; gap:5px; flex-wrap:wrap;">
           <input type="text" id="cdm-st-cat" placeholder="分類（如：電掣 / 水煤 / 收口）" style="width:130px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
           <input type="text" id="cdm-st-word" placeholder="新詞彙（如：13A單蘇 / 煤氣錶）" style="flex:1; min-width:140px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <button id="cdm-st-add" class="btn-solid btn-sm">+ 存入雲端</button>
+          <button id="cdm-st-add" class="btn-solid btn-sm">+ 存入詞庫</button>
         </div>
         ${cloudStampGroups.map((g, gIdx) => `
           <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:8px;">
@@ -340,7 +423,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
               `).join("")}
             </div>
           </div>
-        `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有詞彙，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
+        `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">目前沒有詞彙，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
       `;
 
       bodyEl.querySelector("#cdm-st-add").onclick = async () => {
@@ -372,7 +455,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
         <div style="display:flex; gap:5px; flex-wrap:wrap;">
           <input type="text" id="cdm-ph-cat" placeholder="分類（如：搬運收口）" style="width:110px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
           <input type="text" id="cdm-ph-txt" placeholder="新批改短語..." style="flex:1; min-width:150px; padding:5px 7px; border:1px solid #CBD5E1; border-radius:5px; font-size:12px;" />
-          <button id="cdm-ph-add" class="btn-solid btn-sm">+ 存入雲端</button>
+          <button id="cdm-ph-add" class="btn-solid btn-sm">+ 存入詞庫</button>
         </div>
         <div style="display:flex; flex-direction:column; gap:4px;">
           ${cloudPhraseBank.map((p, idx) => `
@@ -386,7 +469,7 @@ function openCloudDictModal(initialTab = "STAMP", onCloseRefresh = null) {
                 <button class="cdm-ph-del" data-idx="${idx}" style="background:none; border:none; color:#DC2626; cursor:pointer; font-size:12px;">✕</button>
               </div>
             </div>
-          `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">雲端資料庫目前沒有短語，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
+          `).join("") || `<div style="font-size:12px; color:#64748B; padding:10px;">目前沒有短語，可手動新增或點上方「匯入範本至雲端DB」。</div>`}
         </div>
       `;
 
@@ -521,19 +604,45 @@ if (shareToken) {
   renderPublicShareReportView(root, shareToken);
 } else {
   checkBrowserCompatibility();
+  updateNetworkBanner();
 
-  watchAuth(async () => {
-    applyBrandTitle();
-    masterDict = await loadMasterDict();
-    await loadCloudDictionaryFromDB();
-    renderProjectList();
-  }, () => {
-    applyBrandTitle();
-    renderLoginView(root);
+  const bootOfflineIfCached = async () => {
+    if (!navigator.onLine && localStorage.getItem(OFFLINE_AUTH_FLAG) === "1") {
+      applyBrandTitle();
+      masterDict = await loadMasterDict().catch(() => null);
+      await loadCloudDictionaryFromDB();
+      const idbList = await idbGetAllProjects();
+      if (idbList.length) saveLocalProjects(idbList);
+      renderProjectList();
+      return true;
+    }
+    return false;
+  };
+
+  bootOfflineIfCached().then((startedOffline) => {
+    if (startedOffline) return;
+    watchAuth(async () => {
+      localStorage.setItem(OFFLINE_AUTH_FLAG, "1");
+      applyBrandTitle();
+      masterDict = await loadMasterDict();
+      await loadCloudDictionaryFromDB();
+      await flushOfflineSyncQueue();
+      renderProjectList();
+    }, () => {
+      applyBrandTitle();
+      renderLoginView(root);
+    });
   });
 }
 
 async function fetchAllCloudProjectsSplit(forceRefresh = false) {
+  if (!navigator.onLine) {
+    const idbAll = await idbGetAllProjects();
+    return {
+      active: dedupProjects(idbAll.filter(x => x.archived !== true)),
+      archived: dedupProjects(idbAll.filter(x => x.archived === true))
+    };
+  }
   if (!forceRefresh && Array.isArray(cachedCloudActiveList) && Array.isArray(cachedCloudArchivedList)) {
     return { active: cachedCloudActiveList, archived: cachedCloudArchivedList };
   }
@@ -542,6 +651,7 @@ async function fetchAllCloudProjectsSplit(forceRefresh = false) {
   const rawArchived = [];
   snap.forEach(d => {
     const item = { id: d.id, ...d.data() };
+    idbSaveProject(item).catch(() => {});
     if (item.archived === true) rawArchived.push(item);
     else rawActive.push(item);
   });
@@ -566,11 +676,17 @@ async function renderProjectList(options = {}) {
   let localList = getLocalProjects().filter(p => p.archived !== true);
   const hiddenSet = getHiddenIds();
 
-  if (localList.length === 0 && !localStorage.getItem(LOCAL_ACTIVE_KEY)) {
-    root.innerHTML = `<div class="card">首次初始化進行中工程清單...</div>`;
-    const activeFromCloud = await fetchActiveCloudProjects(false);
-    localList = activeFromCloud.filter(p => !hiddenSet.has(p.id));
-    saveLocalProjects(localList);
+  if (localList.length === 0) {
+    const idbCached = await idbGetAllProjects();
+    if (idbCached.length) {
+      localList = idbCached.filter(p => p.archived !== true && !hiddenSet.has(p.id));
+      saveLocalProjects(localList);
+    } else if (navigator.onLine && !localStorage.getItem(LOCAL_ACTIVE_KEY)) {
+      root.innerHTML = `<div class="card">首次初始化進行中工程清單...</div>`;
+      const activeFromCloud = await fetchActiveCloudProjects(false);
+      localList = activeFromCloud.filter(p => !hiddenSet.has(p.id));
+      saveLocalProjects(localList);
+    }
   }
 
   const visibleProjects = localList
@@ -589,13 +705,13 @@ async function renderProjectList(options = {}) {
 
     <div id="summon-cloud-box" class="card ${openSummon ? "" : "hidden"}" style="background:#EFF6FF; border:1.5px solid #3B82F6;">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
-        <strong style="font-size:13px; color:#1E3A8A;">📣 召喚工程（雲端未完工清單）</strong>
+        <strong style="font-size:13px; color:#1E3A8A;">📣 召喚工程（雲端及本機快取清單）</strong>
         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
           <label style="font-size:11px; color:#334155; display:flex; align-items:center; gap:4px; cursor:pointer;">
             <input type="checkbox" id="chk-show-archived-summon" ${showArchivedInSummon ? "checked" : ""} />
             查看已完工封存
           </label>
-          <button id="btn-refresh-summon" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">🔄 刷新雲端</button>
+          <button id="btn-refresh-summon" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">🔄 刷新</button>
           <button id="btn-close-summon-box" class="btn-outline btn-sm">關閉</button>
         </div>
       </div>
@@ -611,7 +727,7 @@ async function renderProjectList(options = {}) {
         <strong style="font-size:13px; color:#0F172A;">🧹 後台資料庫清潔</strong>
         <button id="btn-close-cleaner" class="btn-outline btn-sm">關閉</button>
       </div>
-      <div id="cleaner-body" style="font-size:12px; color:#334155;">正在掃描雲端資料庫...</div>
+      <div id="cleaner-body" style="font-size:12px; color:#334155;">正在掃描資料庫...</div>
     </div>
 
     <div id="proj-cards">
@@ -663,7 +779,7 @@ async function renderProjectList(options = {}) {
         `;
       }).join("") || `
         <div class="card" style="color:#475569; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-          <span>目前首頁沒有進行中的工程（零數據待機中）。</span>
+          <span>目前首頁沒有進行中的工程。</span>
           <button id="btn-empty-summon" class="btn-solid btn-sm">📣 立即召喚工程</button>
         </div>
       `}
@@ -679,8 +795,12 @@ async function renderProjectList(options = {}) {
     if (!name) return;
     const id = "P_" + Date.now();
     const newProj = { id, name, pages: [], contacts: [], archived: false, updatedAt: Date.now() };
-    await setDoc(doc(db, PROJ_COL, id), newProj);
     upsertLocalProject(newProj);
+    if (navigator.onLine) {
+      await setDoc(doc(db, PROJ_COL, id), newProj).catch(() => idbEnqueueSync({ type: "PROJECT", targetId: id, payload: newProj }));
+    } else {
+      await idbEnqueueSync({ type: "PROJECT", targetId: id, payload: newProj });
+    }
     if (Array.isArray(cachedCloudActiveList)) cachedCloudActiveList.unshift(newProj);
     openProject(newProj);
   };
@@ -728,7 +848,13 @@ async function renderProjectList(options = {}) {
       if (!confirm(`確定將「${cleanTitle}」標記為完工封存嗎？`)) return;
       target.name = cleanTitle; target.archived = true; target.archivedAt = Date.now();
       const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
+      const payload = { ...target, pages: slimPages };
+      await idbSaveProject(payload);
+      if (navigator.onLine) {
+        await setDoc(doc(db, PROJ_COL, target.id), payload).catch(() => idbEnqueueSync({ type: "PROJECT", targetId: target.id, payload }));
+      } else {
+        await idbEnqueueSync({ type: "PROJECT", targetId: target.id, payload });
+      }
       removeLocalProjectById(target.id);
       if (Array.isArray(cachedCloudActiveList)) cachedCloudActiveList = cachedCloudActiveList.filter(x => x.id !== target.id);
       if (Array.isArray(cachedCloudArchivedList)) cachedCloudArchivedList.unshift(target);
@@ -796,6 +922,21 @@ function renderContactDrawerHtml(proj) {
   `;
 }
 
+async function persistProjectObject(proj) {
+  const slimPages = (proj.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
+  const payload = { ...proj, pages: slimPages };
+  upsertLocalProject(proj);
+  if (!navigator.onLine) {
+    await idbEnqueueSync({ type: "PROJECT", targetId: proj.id, payload });
+    return;
+  }
+  try {
+    await setDoc(doc(db, PROJ_COL, proj.id), payload);
+  } catch (_) {
+    await idbEnqueueSync({ type: "PROJECT", targetId: proj.id, payload });
+  }
+}
+
 function bindContactEvents(projectListRef, onRefresh) {
   root.querySelectorAll(".btn-contact-close").forEach(btn => { btn.onclick = () => { openContactProjId = null; onRefresh(); }; });
   root.querySelectorAll(".btn-ct-role-preset").forEach(btn => {
@@ -816,9 +957,7 @@ function bindContactEvents(projectListRef, onRefresh) {
       if (!Array.isArray(target.contacts)) target.contacts = [];
       target.contacts.push({ name: nameVal || "聯絡記錄", role: roleVal, phone: phoneVal });
       target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
+      await persistProjectObject(target);
       onRefresh();
     };
   });
@@ -838,9 +977,7 @@ function bindContactEvents(projectListRef, onRefresh) {
       item.role = nextRole.trim();
       item.phone = nextPhone.trim();
       target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
+      await persistProjectObject(target);
       onRefresh();
     };
   });
@@ -851,9 +988,7 @@ function bindContactEvents(projectListRef, onRefresh) {
       if (!target || !Array.isArray(target.contacts)) return;
       target.contacts.splice(Number(btn.dataset.cidx), 1);
       target.updatedAt = Date.now();
-      const slimPages = (target.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-      await setDoc(doc(db, PROJ_COL, target.id), { ...target, pages: slimPages });
-      upsertLocalProject(target);
+      await persistProjectObject(target);
       onRefresh();
     };
   });
@@ -862,9 +997,7 @@ function bindContactEvents(projectListRef, onRefresh) {
 async function renameProjectEverywhere(proj, newCleanName) {
   proj.name = newCleanName;
   proj.updatedAt = Date.now();
-  const slimPages = (proj.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-  await setDoc(doc(db, PROJ_COL, proj.id), { ...proj, pages: slimPages });
-  upsertLocalProject(proj);
+  await persistProjectObject(proj);
   if (Array.isArray(cachedCloudActiveList)) {
     const found = cachedCloudActiveList.find(x => x.id === proj.id);
     if (found) found.name = newCleanName;
@@ -874,7 +1007,7 @@ async function renameProjectEverywhere(proj, newCleanName) {
 async function populateSummonList(forceRefresh = false) {
   const listBody = document.getElementById("summon-list-body");
   if (!listBody) return;
-  listBody.innerHTML = `<div style="font-size:12px; color:#475569; padding:8px;">正在連線查詢雲端未完工工程...</div>`;
+  listBody.innerHTML = `<div style="font-size:12px; color:#475569; padding:8px;">正在查詢工程清單...</div>`;
   try {
     const activeList = await fetchActiveCloudProjects(forceRefresh);
     let combinedList = [...activeList];
@@ -933,16 +1066,14 @@ async function populateSummonList(forceRefresh = false) {
         const found = combinedList.find(p => p.id === btn.dataset.sid);
         if (!found) return;
         found.archived = false; found.updatedAt = Date.now();
-        const slimPages = (found.pages || []).map(pg => ({ ...pg, sitePhotoUrl: "" }));
-        await setDoc(doc(db, PROJ_COL, found.id), { ...found, pages: slimPages });
+        await persistProjectObject(found);
         const s = getHiddenIds(); s.delete(found.id); saveHiddenIds(s);
-        upsertLocalProject(found);
         cachedCloudActiveList = null; cachedCloudArchivedList = null;
         renderProjectList({ openSummon: true, forceFetchCloud: true });
       };
     });
   } catch (err) {
-    listBody.innerHTML = `<div style="font-size:12px; color:#DC2626; padding:8px;">雲端查詢失敗：${err.message || err}</div>`;
+    listBody.innerHTML = `<div style="font-size:12px; color:#DC2626; padding:8px;">查詢失敗：${err.message || err}</div>`;
   }
 }
 
@@ -950,6 +1081,10 @@ async function openDatabaseCleaner() {
   const box = document.getElementById("db-cleaner-box");
   const body = document.getElementById("cleaner-body");
   box.classList.remove("hidden");
+  if (!navigator.onLine) {
+    body.innerHTML = `<span style="color:#D97706;">離線模式無法連線雲端資料庫清理，請恢復連線後使用。</span>`;
+    return;
+  }
   body.innerHTML = `正在按需掃描重複工程、零碎空檔與孤兒圖片...`;
   try {
     const projSnap = await getDocs(collection(db, PROJ_COL));
@@ -1009,26 +1144,58 @@ async function openDatabaseCleaner() {
 
 async function ensureSinglePagePhoto(proj, page) {
   if (!page) return "";
-  if (page.sitePhotoUrl && page.sitePhotoUrl.length > 50) { memoryPhotoCache.set(page.id, page.sitePhotoUrl); return page.sitePhotoUrl; }
-  if (memoryPhotoCache.has(page.id)) { page.sitePhotoUrl = memoryPhotoCache.get(page.id); return page.sitePhotoUrl; }
+  if (page.sitePhotoUrl && page.sitePhotoUrl.length > 50) {
+    memoryPhotoCache.set(page.id, page.sitePhotoUrl);
+    return page.sitePhotoUrl;
+  }
+  if (memoryPhotoCache.has(page.id)) {
+    page.sitePhotoUrl = memoryPhotoCache.get(page.id);
+    return page.sitePhotoUrl;
+  }
+
+  // 1. 優先從本機 IndexedDB 圖庫讀取（斷網無訊號也能秒開）
+  const lookupKey = page.mediaRefId ? String(page.mediaRefId) : `PAGE_${page.id}`;
+  const idbData = await idbGetMedia(lookupKey);
+  if (idbData) {
+    page.sitePhotoUrl = idbData;
+    memoryPhotoCache.set(page.id, idbData);
+    return idbData;
+  }
+
+  if (!navigator.onLine) return "";
+
+  // 2. 線上從 Firebase 下載並自動存入本機 IndexedDB
   if (page.mediaRefId) {
     try {
       const mDoc = await getDoc(doc(db, MEDIA_COL, String(page.mediaRefId)));
       if (mDoc.exists() && mDoc.data().imageData) {
         page.sitePhotoUrl = mDoc.data().imageData;
         memoryPhotoCache.set(page.id, page.sitePhotoUrl);
+        await idbSaveMedia(String(page.mediaRefId), page.sitePhotoUrl, { projectId: proj?.id, pageId: page.id });
         return page.sitePhotoUrl;
       }
     } catch (_) {}
   }
   if (proj && proj.legacySourceId && page.legacyMediaId) {
     const url = await resolveLegacyMediaPhoto(proj.legacySourceId, page.legacyMediaId);
-    if (url) { page.sitePhotoUrl = url; memoryPhotoCache.set(page.id, url); return url; }
+    if (url) {
+      page.sitePhotoUrl = url;
+      memoryPhotoCache.set(page.id, url);
+      await idbSaveMedia(lookupKey, url, { projectId: proj?.id, pageId: page.id });
+      return url;
+    }
   }
   return "";
 }
 
 async function openProjectLightweight(proj) {
+  if (!navigator.onLine) {
+    const idbAll = await idbGetAllProjects();
+    const localFound = idbAll.find(x => x.id === proj.id) || proj;
+    (localFound.pages || []).forEach(pg => { if (memoryPhotoCache.has(pg.id)) pg.sitePhotoUrl = memoryPhotoCache.get(pg.id); });
+    openProject(localFound);
+    return;
+  }
   root.innerHTML = `<div class="card">載入空間圖集目錄中...</div>`;
   try {
     const freshSnap = await getDoc(doc(db, PROJ_COL, proj.id));
@@ -1070,19 +1237,95 @@ async function saveCurrentProject() {
   if (!currentProject) return;
   const syncEl = document.getElementById("top-auto-save-status");
   if (syncEl) {
-    syncEl.textContent = "⏳ 同步中...";
+    syncEl.textContent = "⏳ 儲存中...";
     syncEl.style.color = "#D97706";
   }
   currentProject.updatedAt = Date.now();
   const slimPages = (currentProject.pages || []).map(p => {
-    if (p.sitePhotoUrl) memoryPhotoCache.set(p.id, p.sitePhotoUrl);
+    if (p.sitePhotoUrl) {
+      memoryPhotoCache.set(p.id, p.sitePhotoUrl);
+      const refKey = p.mediaRefId ? String(p.mediaRefId) : `PAGE_${p.id}`;
+      idbSaveMedia(refKey, p.sitePhotoUrl, { projectId: currentProject.id, pageId: p.id }).catch(() => {});
+    }
     return { ...p, sitePhotoUrl: "" };
   });
-  await setDoc(doc(db, PROJ_COL, currentProject.id), { ...currentProject, pages: slimPages });
+
+  const payload = { ...currentProject, pages: slimPages };
   upsertLocalProject(currentProject);
-  if (syncEl) {
-    syncEl.textContent = "☁️ 已自動儲存";
-    syncEl.style.color = "#059669";
+
+  if (!navigator.onLine) {
+    await idbEnqueueSync({ type: "PROJECT", targetId: currentProject.id, payload });
+    if (syncEl) {
+      syncEl.textContent = "💾 已存本機（待連線同步）";
+      syncEl.style.color = "#B45309";
+    }
+    return;
+  }
+
+  try {
+    await setDoc(doc(db, PROJ_COL, currentProject.id), payload);
+    if (syncEl) {
+      syncEl.textContent = "☁️ 已自動儲存";
+      syncEl.style.color = "#059669";
+    }
+  } catch (_) {
+    await idbEnqueueSync({ type: "PROJECT", targetId: currentProject.id, payload });
+    if (syncEl) {
+      syncEl.textContent = "💾 已存本機（待連線同步）";
+      syncEl.style.color = "#B45309";
+    }
+  }
+}
+
+function compressFileToDataUrl(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 1600;
+        const sc = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * sc);
+        c.height = Math.round(img.height * sc);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.84));
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function savePhotoOfflineFirst(projectId, page, file) {
+  const refId = page.mediaRefId || `M_${projectId}_${page.id}`;
+  page.mediaRefId = refId;
+
+  if (!navigator.onLine) {
+    const dataUrl = await compressFileToDataUrl(file);
+    await idbSaveMedia(refId, dataUrl, { projectId, pageId: page.id });
+    await idbEnqueueSync({
+      type: "MEDIA",
+      targetId: String(refId),
+      payload: { projectId, pageId: page.id, imageData: dataUrl, updatedAt: Date.now() }
+    });
+    return dataUrl;
+  }
+
+  try {
+    const res = await uploadMediaToCloud(projectId, page.id, file);
+    if (res?.mediaRefId) page.mediaRefId = res.mediaRefId;
+    await idbSaveMedia(page.mediaRefId, res.imageData, { projectId, pageId: page.id });
+    return res.imageData;
+  } catch (_) {
+    const dataUrl = await compressFileToDataUrl(file);
+    await idbSaveMedia(refId, dataUrl, { projectId, pageId: page.id });
+    await idbEnqueueSync({
+      type: "MEDIA",
+      targetId: String(refId),
+      payload: { projectId, pageId: page.id, imageData: dataUrl, updatedAt: Date.now() }
+    });
+    return dataUrl;
   }
 }
 
@@ -1146,6 +1389,7 @@ function renderOverview() {
                 style="background:none; border:1px solid #E2E8F0; border-radius:5px; padding:1px 5px; font-size:11px; color:#64748B; cursor:pointer;">✏️</button>
       </div>
       <div style="display:flex; gap:5px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-offline-cache-all" class="btn-outline btn-sm" style="color:#059669; border-color:#86EFAC; background:#F0FDF4; font-weight:800;">📥 離線備份圖庫</button>
         <button id="btn-cloud-dict-open" class="btn-outline btn-sm" style="color:#1D4ED8; border-color:#93C5FD;">⚙️ 雲端詞庫</button>
         <button id="btn-review-board" class="btn-outline btn-sm" style="border-color:#FCA5A5; color:#DC2626; font-weight:700;">
           📋 批改總表${fixTotal > 0 ? ` (${fixTotal})` : ""}
@@ -1238,6 +1482,18 @@ function renderOverview() {
   document.getElementById("btn-preset-space-gear").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
   document.getElementById("btn-picker-manage-sp").onclick = () => openCloudDictModal("SPACE", () => renderOverview());
 
+  document.getElementById("btn-offline-cache-all").onclick = async () => {
+    const btn = document.getElementById("btn-offline-cache-all");
+    btn.disabled = true;
+    await idbSaveProject(currentProject);
+    for (let i = 0; i < pages.length; i++) {
+      btn.textContent = `⏳ 下載離線包 (${i + 1}/${pages.length})...`;
+      await ensureSinglePagePhoto(currentProject, pages[i]);
+    }
+    btn.disabled = false;
+    btn.textContent = `✅ 全套已離線備份 (${pages.length}張)`;
+  };
+
   document.getElementById("btn-overview-contact").onclick = () => document.getElementById("overview-contact-box").classList.toggle("hidden");
   bindContactEvents([currentProject], () => {
     renderOverview();
@@ -1254,7 +1510,7 @@ function renderOverview() {
   };
 
   document.getElementById("btn-open-report").onclick = async () => {
-    root.innerHTML = `<div class="card">正在為報告預覽按需載入底圖...</div>`;
+    root.innerHTML = `<div class="card">正在為報告預覽載入底圖...</div>`;
     await Promise.all((currentProject.pages || []).map(pg => ensureSinglePagePhoto(currentProject, pg)));
     renderReportBuilder(root, currentProject, renderWorkspace);
   };
@@ -1313,10 +1569,10 @@ function renderFlatExpandedGallery(host, sortedGroups, allPages, allSpaces, rend
       };
       currentProject.pages.push(targetPage);
     }
-    const res = await uploadMediaToCloud(currentProject.id, targetPage.id, file);
-    targetPage.sitePhotoUrl = res.imageData;
+    const savedUrl = await savePhotoOfflineFirst(currentProject.id, targetPage, file);
+    targetPage.sitePhotoUrl = savedUrl;
     targetPage.docTypeLabel = "度尺圖";
-    memoryPhotoCache.set(targetPage.id, res.imageData);
+    memoryPhotoCache.set(targetPage.id, savedUrl);
     await saveCurrentProject();
     pendingReplaceSpace = null;
     replaceInput.value = "";
@@ -1929,12 +2185,20 @@ async function renderSinglePageEditor(page) {
           memoryPhotoCache.set(page.id, mergedUrl);
           const refId = page.mediaRefId || `M_${currentProject.id}_${page.id}`;
           page.mediaRefId = refId;
-          await setDoc(doc(db, MEDIA_COL, String(refId)), {
+          await idbSaveMedia(refId, mergedUrl, { projectId: currentProject.id, pageId: page.id });
+          const mediaPayload = {
             projectId: currentProject.id,
             pageId: page.id,
             imageData: mergedUrl,
             updatedAt: Date.now()
-          });
+          };
+          if (!navigator.onLine) {
+            await idbEnqueueSync({ type: "MEDIA", targetId: String(refId), payload: mediaPayload });
+          } else {
+            await setDoc(doc(db, MEDIA_COL, String(refId)), mediaPayload).catch(() =>
+              idbEnqueueSync({ type: "MEDIA", targetId: String(refId), payload: mediaPayload })
+            );
+          }
           await saveCurrentProject();
         },
         onModeSync: (m) => {
@@ -1967,10 +2231,10 @@ async function renderSinglePageEditor(page) {
   document.getElementById("up-site-photo").onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px;">正在壓縮並同步底圖至雲端...</div>`;
-    const res = await uploadMediaToCloud(currentProject.id, page.id, file);
-    page.sitePhotoUrl = res.imageData;
-    memoryPhotoCache.set(page.id, res.imageData);
+    host.innerHTML = `<div style="color:#475569; text-align:center; padding:50px;">正在儲存底圖（支援離線本機儲存）...</div>`;
+    const savedUrl = await savePhotoOfflineFirst(currentProject.id, page, file);
+    page.sitePhotoUrl = savedUrl;
+    memoryPhotoCache.set(page.id, savedUrl);
     await saveCurrentProject();
     showMeasure();
   };
