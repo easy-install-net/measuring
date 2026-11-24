@@ -1,33 +1,12 @@
-<!DOCTYPE html>
-<html lang="zh-HK">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>Measuring | 現場度尺與審圖系統</title>
-  <link rel="stylesheet" href="./css/theme.css" />
-  <link rel="stylesheet" href="./css/canvas-labels.css" />
-</head>
-<body>
-  <div id="webview-banner" class="banner-warning hidden">
-    ⚠️ 偵測到非 Safari 瀏覽器，為確保下載 PDF 順暢，請點擊右上角「在 Safari 中開啟」
-  </div>
+<!-- 加在 <head> 裡面 -->
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#0F172A" />
 
-  <header class="app-header">
-    <div class="header-left">
-      <span class="brand-title">MEASURING</span>
-      <span id="sync-dot" class="status-dot dot-green" title="雲端已連線"></span>
-    </div>
-    <div class="header-right">
-      <button id="btn-auth-action" class="btn-solid btn-sm">登入</button>
-    </div>
-  </header>
-
-  <main id="app-root" class="app-container">
-    <div class="loading-state">正在載入標準字典與工程資料...</div>
-  </main>
-
-  <script type="module" src="./js/app.js?v=2"></script>
-</body>
-</html>
+<!-- 加在 </body> 前面 -->
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+</script>
