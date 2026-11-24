@@ -48,8 +48,8 @@ export class MeasureCanvas {
     this.mode = "VIEW";
     this.multiSelectMode = false;
     this.activeColor = this.colors[0] || "#DC2626";
-    this.strokeWidth = 1.5;
-    this.fontSize = 18;
+    this.strokeWidth = 2;
+    this.fontSize = 24;
     this.whiteBg = false;
     this.selectedItems = [];
     this.undoStack = [];
@@ -66,7 +66,18 @@ export class MeasureCanvas {
     this.marqueeRect = null;
     this.lastTapTime = 0;
     this.lastTapPos = null;
-    this.pinchDist = 0;
+
+    // Procreate 雙指手勢狀態
+    this.isTwoFingerGesture = false;
+    this.touchLiftGuard = false;
+    this.twoFingerStartDist = 0;
+    this.twoFingerStartScale = 1;
+    this.twoFingerStartImgMid = { x: 0, y: 0 };
+    this.twoFingerTapStartTime = 0;
+    this.twoFingerTapStartMid = { x: 0, y: 0 };
+    this.twoFingerMoved = false;
+
+    this.rafPending = false;
 
     this.activePhraseCat = "全部";
     this.activeRulerCat = "高";
@@ -79,12 +90,48 @@ export class MeasureCanvas {
     this.bgImg.crossOrigin = "anonymous";
     this.bgImg.onload = () => {
       this.fitImageToScreen();
-      this.render();
+      this.migrateLegacyScreenSpaceFonts();
+      this.scheduleRender();
     };
     this.bgImg.src = imageUrl;
 
     this.buildDOM();
     this.bindEvents();
+  }
+
+  // 將舊版未轉換的螢幕像素字級自動換算為底圖空間字級，確保放大縮小時等比隨動
+  migrateLegacyScreenSpaceFonts() {
+    const baseFit = Math.max(0.15, this.fitScale || 1);
+    const convertObj = (obj, fallbackScreenPx) => {
+      if (!obj || obj._imgSpaceFont) return;
+      const raw = obj.fontSize || fallbackScreenPx;
+      obj.fontSize = Math.round(raw / baseFit);
+      obj._imgSpaceFont = true;
+    };
+    this.markers.forEach(m => convertObj(m, 18));
+    this.stickers.forEach(s => convertObj(s, 15));
+    this.arrows.forEach(a => convertObj(a, 16));
+    this.lines.forEach(l => convertObj(l, 15));
+  }
+
+  // 根據當前底圖解析度取得標準字級（直接綁定底圖座標系，隨底圖等比例放大縮小）
+  getImageSpaceFontSize(baseScreenPx = 18) {
+    const baseFit = Math.max(0.15, this.fitScale || 1);
+    return Math.max(14, Math.round(baseScreenPx / baseFit));
+  }
+
+  getImageSpaceStrokeWidth(baseScreenSw = 2) {
+    const baseFit = Math.max(0.15, this.fitScale || 1);
+    return Math.max(1.5, Number((baseScreenSw / baseFit).toFixed(2)));
+  }
+
+  scheduleRender() {
+    if (this.rafPending) return;
+    this.rafPending = true;
+    requestAnimationFrame(() => {
+      this.rafPending = false;
+      this.render();
+    });
   }
 
   isItemSelected(type, index) {
@@ -109,11 +156,6 @@ export class MeasureCanvas {
     return Boolean(plainOpen || arrowOpen || rulerOpen);
   }
 
-  getAdaptiveFontSize(basePx = 18) {
-    const zoomRatio = Math.max(0.8, this.scale / Math.max(0.05, this.fitScale || 1));
-    return Math.min(72, Math.max(basePx, Math.round(basePx * zoomRatio)));
-  }
-
   getPhraseBank() {
     return typeof this.navOpts.getPhraseBank === "function" ? (this.navOpts.getPhraseBank() || []) : [];
   }
@@ -127,7 +169,7 @@ export class MeasureCanvas {
     if (this.overlayImageCache.has(src)) return this.overlayImageCache.get(src);
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.onload = () => this.render();
+    img.onload = () => this.scheduleRender();
     img.src = src;
     this.overlayImageCache.set(src, img);
     return img;
@@ -149,7 +191,7 @@ export class MeasureCanvas {
       this.setMode("SELECT_SINGLE");
       this.updateNearToolbar();
       this.emitSave();
-      this.render();
+      this.scheduleRender();
     };
     img.src = dataUrl;
   }
@@ -172,8 +214,6 @@ export class MeasureCanvas {
       octx.drawImage(this.bgImg, 0, 0, baseW, baseH);
     }
 
-    const renderScale = Math.max(0.2, this.scale || 1);
-
     for (const targetItem of this.selectedItems) {
       const { type, index } = targetItem;
       const obj = this.getObjectByTypeAndIndex(type, index);
@@ -190,17 +230,17 @@ export class MeasureCanvas {
           octx.restore();
         }
       } else if (type === "marker") {
-        const fs = (obj.fontSize || 18) / renderScale;
+        const fs = obj.fontSize || 28;
         octx.save();
         octx.font = `800 ${fs}px sans-serif`;
-        const wText = Math.max(octx.measureText(obj.text || "").width, 20 / renderScale);
-        const padX = 6 / renderScale;
-        const padY = 4 / renderScale;
+        const wText = Math.max(octx.measureText(obj.text || "").width, fs * 1.1);
+        const padX = fs * 0.35;
+        const padY = fs * 0.24;
         const w = wText + padX * 2;
         const h = fs + padY * 2;
         octx.fillStyle = "rgba(255,255,255,0.82)";
         octx.beginPath();
-        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, 4 / renderScale);
+        octx.roundRect(obj.x - w / 2, obj.y - h / 2, w, h, fs * 0.24);
         octx.fill();
         octx.textAlign = "center";
         octx.textBaseline = "middle";
@@ -208,10 +248,10 @@ export class MeasureCanvas {
         octx.fillText(obj.text || "", obj.x, obj.y);
         octx.restore();
       } else if (type === "sticker") {
-        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 15, 0.78, renderScale);
+        this.drawPillLabelOnContext(octx, obj.x, obj.y, obj.label || "", obj.bg || "#DC2626", obj.color || "#FFFFFF", obj.fontSize || 24, 0.8);
       } else if (type === "line") {
         octx.save();
-        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        const sw = obj.strokeWidth || 3;
         octx.strokeStyle = obj.color || "#2563EB";
         octx.lineWidth = sw;
         octx.beginPath();
@@ -219,13 +259,13 @@ export class MeasureCanvas {
         octx.lineTo(obj.x2, obj.y2);
         octx.stroke();
         if (obj.text) {
-          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 15, 0.9, renderScale);
+          this.drawPillLabelOnContext(octx, (obj.x1 + obj.x2) / 2, (obj.y1 + obj.y2) / 2, obj.text, "#FFFFFF", obj.color || "#2563EB", obj.fontSize || 24, 0.9);
         }
         octx.restore();
       } else if (type === "arrow") {
         octx.save();
         const col = obj.color || "#DC2626";
-        const sw = (obj.strokeWidth || 1.8) / renderScale;
+        const sw = obj.strokeWidth || 3;
         octx.strokeStyle = col;
         octx.fillStyle = col;
         octx.lineWidth = sw;
@@ -234,7 +274,7 @@ export class MeasureCanvas {
         octx.lineTo(obj.x2, obj.y2);
         octx.stroke();
         const ang = Math.atan2(obj.y1 - obj.y2, obj.x1 - obj.x2);
-        const headLen = 12 / renderScale;
+        const headLen = Math.max(18, sw * 5);
         octx.beginPath();
         octx.moveTo(obj.x1, obj.y1);
         octx.lineTo(obj.x1 - headLen * Math.cos(ang - Math.PI / 6), obj.y1 - headLen * Math.sin(ang - Math.PI / 6));
@@ -242,13 +282,13 @@ export class MeasureCanvas {
         octx.closePath();
         octx.fill();
         if (obj.text) {
-          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 16, 0.8, renderScale);
+          this.drawPillLabelOnContext(octx, obj.x2, obj.y2, obj.text, col, "#FFFFFF", obj.fontSize || 26, 0.82);
         }
         octx.restore();
       } else if (type === "path" && Array.isArray(obj.points) && obj.points.length > 1) {
         octx.save();
         octx.strokeStyle = obj.color || "#DC2626";
-        octx.lineWidth = (obj.strokeWidth || 1.5) / renderScale;
+        octx.lineWidth = obj.strokeWidth || 3;
         octx.lineCap = "round";
         octx.lineJoin = "round";
         octx.beginPath();
@@ -267,14 +307,14 @@ export class MeasureCanvas {
     this.updateNearToolbar();
     this.imageUrl = mergedDataUrl;
     this.bgImg = new Image();
-    this.bgImg.onload = () => this.render();
+    this.bgImg.onload = () => this.scheduleRender();
     this.bgImg.src = mergedDataUrl;
 
     if (typeof this.navOpts.onBaseImageMerged === "function") {
       await this.navOpts.onBaseImageMerged(mergedDataUrl);
     }
     this.emitSave();
-    this.render();
+    this.scheduleRender();
   }
 
   pushUndoSnapshot() {
@@ -304,7 +344,7 @@ export class MeasureCanvas {
     if (prev.imageUrl && prev.imageUrl !== this.imageUrl) {
       this.imageUrl = prev.imageUrl;
       this.bgImg = new Image();
-      this.bgImg.onload = () => this.render();
+      this.bgImg.onload = () => this.scheduleRender();
       this.bgImg.src = prev.imageUrl;
       if (typeof this.navOpts.onBaseImageMerged === "function") {
         await this.navOpts.onBaseImageMerged(prev.imageUrl);
@@ -314,7 +354,7 @@ export class MeasureCanvas {
     this.updateNearToolbar();
     this.updateUndoButtonState();
     this.emitSave();
-    this.render();
+    this.scheduleRender();
   }
 
   updateUndoButtonState() {
@@ -352,7 +392,7 @@ export class MeasureCanvas {
       this.selectedItems = [];
     }
     this.updateNearToolbar();
-    this.render();
+    this.scheduleRender();
   }
 
   setActiveColor(col) {
@@ -369,27 +409,28 @@ export class MeasureCanvas {
         }
       });
       this.emitSave();
-      this.render();
+      this.scheduleRender();
     }
   }
 
   setStrokeWidth(val) {
     this.strokeWidth = val;
+    const imgSw = this.getImageSpaceStrokeWidth(val);
     if (this.selectedItems.length) {
       this.selectedItems.forEach(it => {
         const obj = this.getObjectByTypeAndIndex(it.type, it.index);
         if (obj && (it.type === "path" || it.type === "line" || it.type === "arrow")) {
-          obj.strokeWidth = val;
+          obj.strokeWidth = imgSw;
         }
       });
-      this.render();
+      this.scheduleRender();
     }
   }
 
   resetZoom() {
     this.fitImageToScreen();
     this.updateNearToolbar();
-    this.render();
+    this.scheduleRender();
   }
 
   makeFloatingBoxDraggable(boxEl, handleEl) {
@@ -428,8 +469,8 @@ export class MeasureCanvas {
   buildDOM() {
     const quickColors = this.colors.slice(0, 6);
     this.container.innerHTML = `
-      <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none;">
-        <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC;"></canvas>
+      <div class="mc-root" style="position:relative; width:100%; height:100%; background:#F8FAFC; overflow:hidden; user-select:none; touch-action:none; -webkit-user-select:none;">
+        <canvas class="mc-canvas" style="display:block; width:100%; height:100%; background:#F8FAFC; touch-action:none;"></canvas>
 
         <!-- 精簡合併工具列：直接並排「單選」「多選」 -->
         <div class="mc-topbar" style="position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:3px; padding:4px 8px; background:rgba(255,255,255,0.96); border:1px solid #CBD5E1; border-radius:999px; box-shadow:0 4px 14px rgba(15,23,42,0.1); z-index:20; max-width:96vw; overflow-x:auto;">
@@ -453,7 +494,7 @@ export class MeasureCanvas {
         <div class="mc-near-toolbar" style="position:absolute; display:none; align-items:center; gap:5px; padding:5px 9px; background:rgba(15,23,42,0.95); color:#FFF; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,0.32); z-index:35; white-space:nowrap;">
           <span class="mc-near-count hidden" style="background:#2563EB; color:#FFF; font-size:10px; font-weight:800; padding:1px 6px; border-radius:999px;">已選2項</span>
           <button type="button" class="mc-near-dec" title="縮小 / 變幼" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">‹</button>
-          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">18</span>
+          <span class="mc-near-val" style="font-size:11px; font-weight:700; min-width:24px; text-align:center; color:#E2E8F0;">24</span>
           <button type="button" class="mc-near-inc" title="放大 / 變粗" style="background:#334155; color:#FFF; border:none; border-radius:999px; width:22px; height:22px; font-size:13px; font-weight:800; cursor:pointer; line-height:1;">›</button>
 
           <div class="mc-near-colors-wrap" style="display:flex; align-items:center; gap:3px; padding-left:4px; border-left:1px solid #475569;">
@@ -468,7 +509,7 @@ export class MeasureCanvas {
           <button type="button" class="mc-near-del" title="刪除" style="background:#EF4444; color:#FFF; border:none; border-radius:999px; padding:3px 7px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;">刪除</button>
         </div>
 
-        <!-- 拉高加寬版「尺寸標註」浮窗：inputmode="none" 不觸發系統鍵盤，內建專屬數字小按鍵 -->
+        <!-- 尺寸標註浮窗 -->
         <div class="mc-ruler-box hidden" style="position:absolute; width:min(410px, 95vw); background:#FFF; border:1.5px solid #0F172A; border-radius:10px; padding:8px; box-shadow:0 14px 32px rgba(15,23,42,0.28); z-index:48; display:flex; flex-direction:column; gap:7px;">
           <div class="mc-ruler-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#F1F5F9; padding:3px 7px; border-radius:5px; cursor:grab; font-size:11px; color:#475569;">
             <strong>⠿ 尺寸標註 <span style="font-weight:400;">(按住此列可拖動)</span></strong>
@@ -481,7 +522,6 @@ export class MeasureCanvas {
             <button type="button" class="mc-ruler-ok" style="background:#0F172A; color:#FFF; border:none; border-radius:6px; padding:6px 14px; font-size:12px; font-weight:800; cursor:pointer;">確定</button>
           </div>
 
-          <!-- 內建防遮擋數字鍵盤（完全不觸發 iOS / Android 系統鍵盤） -->
           <div class="mc-ruler-numpad" style="display:grid; grid-template-columns:repeat(7, 1fr); gap:3px; background:#F1F5F9; padding:4px; border-radius:6px; border:1px solid #CBD5E1;">
             ${["1","2","3","4","5","6","7","8","9","0",".","×","⌫","清空"].map(k => `
               <button type="button" class="mc-rnum-btn" data-rnum="${k}"
@@ -491,7 +531,6 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 智慧分格尺寸輸入區（點選 (闊高厚)/(闊高深)/(高厚)/(闊高) 自動展開） -->
           <div class="mc-ruler-split-box hidden" style="background:#EFF6FF; border:1.5px solid #3B82F6; border-radius:7px; padding:6px; display:flex; flex-direction:column; gap:5px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
               <strong class="mc-rsplit-title" style="font-size:12px; color:#1E40AF;">明喉</strong>
@@ -509,10 +548,7 @@ export class MeasureCanvas {
             `).join("")}
           </div>
 
-          <!-- 動態渲染：高 / 留位 / 構造 + 電掣 / 水煤 / 收口/結構 等雲端詞庫分類 -->
           <div class="mc-ruler-cats" style="display:flex; flex-wrap:wrap; gap:4px; border-top:1px solid #E2E8F0; padding-top:6px;"></div>
-
-          <!-- 拉高詞彙區至 220px，減少滾動 -->
           <div class="mc-ruler-items" style="max-height:220px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:5px; background:#F8FAFC; padding:7px; border-radius:6px; border:1px solid #E2E8F0;"></div>
 
           <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -531,7 +567,7 @@ export class MeasureCanvas {
           </div>
         </div>
 
-        <!-- 拉高版「箭頭批改」浮窗 -->
+        <!-- 箭頭批改浮窗 -->
         <div class="mc-arrow-box hidden" style="position:absolute; width:min(330px, 92vw); background:#FFF; border:1.5px solid #2563EB; border-radius:9px; padding:7px; box-shadow:0 12px 28px rgba(15,23,42,0.24); z-index:45; display:flex; flex-direction:column; gap:6px;">
           <div class="mc-arrow-drag-handle" style="display:flex; justify-content:space-between; align-items:center; background:#EFF6FF; padding:3px 6px; border-radius:4px; cursor:grab; font-size:10px; color:#1D4ED8;">
             <strong>⠿ 箭頭批改 <span style="font-weight:400;">(按住可拖動)</span></strong>
@@ -551,7 +587,6 @@ export class MeasureCanvas {
                  style="width:100%; box-sizing:border-box; padding:5px 7px; border:1px solid #93C5FD; border-radius:5px; font-size:12px;" />
 
           <div style="display:flex; gap:4px; overflow-x:auto;" class="mc-phrase-cats"></div>
-          <!-- 拉高短語列表至 225px -->
           <div style="max-height:225px; overflow-y:auto; display:flex; flex-direction:column; gap:3px; background:#F8FAFC; padding:5px; border-radius:5px; border:1px solid #E2E8F0;" class="mc-phrase-items"></div>
 
           <div style="display:flex; justify-content:flex-end; gap:5px;">
@@ -593,13 +628,14 @@ export class MeasureCanvas {
   resizeCanvas() {
     if (!this.canvas || !this.rootEl) return;
     const rect = this.rootEl.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    // 限制最高 DPR 為 1.5，在 iPad Retina 螢幕上兼顧銳利度與 60fps 順滑縮放
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     this.canvas.width = Math.max(1, rect.width * dpr);
     this.canvas.height = Math.max(1, rect.height * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.viewW = rect.width;
     this.viewH = rect.height;
-    this.render();
+    this.scheduleRender();
   }
 
   fitImageToScreen() {
@@ -625,7 +661,7 @@ export class MeasureCanvas {
 
   toggleWhiteBackground() {
     this.whiteBg = !this.whiteBg;
-    this.render();
+    this.scheduleRender();
     return this.whiteBg;
   }
 
@@ -678,16 +714,19 @@ export class MeasureCanvas {
           obj.w = Math.max(40, obj.w * factor);
           obj.h = Math.max(40, obj.h * factor);
         } else if (it.type === "marker" || it.type === "sticker" || it.type === "arrow" || it.type === "line") {
-          const cur = obj.fontSize || (it.type === "line" ? 15 : 18);
-          const step = Math.max(2, Math.round(cur * 0.14));
-          obj.fontSize = Math.min(120, Math.max(10, cur + (delta > 0 ? step : -step)));
+          const cur = obj.fontSize || this.getImageSpaceFontSize(18);
+          const step = Math.max(3, Math.round(cur * 0.14));
+          obj.fontSize = Math.min(260, Math.max(12, cur + (delta > 0 ? step : -step)));
+          obj._imgSpaceFont = true;
         } else {
-          obj.strokeWidth = Math.min(10, Math.max(0.5, Number(((obj.strokeWidth || 1.5) + (delta > 0 ? 0.5 : -0.5)).toFixed(1))));
+          const curSw = obj.strokeWidth || this.getImageSpaceStrokeWidth(2);
+          const stepSw = Math.max(0.5, Number((curSw * 0.18).toFixed(1)));
+          obj.strokeWidth = Math.min(40, Math.max(1, Number((curSw + (delta > 0 ? stepSw : -stepSw)).toFixed(1))));
         }
       });
       this.updateNearToolbar();
       this.emitSave();
-      this.render();
+      this.scheduleRender();
     };
 
     this.nearToolbar.querySelector(".mc-near-dec").onclick = () => adjustSelectedSize(-2);
@@ -714,7 +753,7 @@ export class MeasureCanvas {
           }
         });
         this.emitSave();
-        this.render();
+        this.scheduleRender();
       };
     });
 
@@ -732,7 +771,7 @@ export class MeasureCanvas {
           obj.status = newStatus;
           this.emitSave(newTxt.trim() ? `[${this.formatStatusLabel(newStatus)}] ${newTxt.trim()}` : "", newStatus);
           this.updateNearToolbar();
-          this.render();
+          this.scheduleRender();
         });
       } else if (single.type === "line") {
         this.openRulerEditor(scr.x, scr.y, obj.text || "", (newTxt) => {
@@ -740,7 +779,7 @@ export class MeasureCanvas {
           obj.text = newTxt;
           this.emitSave();
           this.updateNearToolbar();
-          this.render();
+          this.scheduleRender();
         });
       } else {
         this.openPlainTextEditor(scr.x, scr.y, obj.text || obj.label || "", (newTxt) => {
@@ -749,7 +788,7 @@ export class MeasureCanvas {
           else obj.text = newTxt;
           this.emitSave();
           this.updateNearToolbar();
-          this.render();
+          this.scheduleRender();
         });
       }
     };
@@ -762,10 +801,9 @@ export class MeasureCanvas {
       this.selectedItems = [];
       this.updateNearToolbar();
       this.emitSave();
-      this.render();
+      this.scheduleRender();
     };
 
-    // 追蹤目前聚焦的是主輸入框還是分格輸入框（完全不觸發系統鍵盤）
     this.activeRulerTargetInput = this.rulerInput;
     this.rulerInput.addEventListener("focus", () => { this.activeRulerTargetInput = this.rulerInput; });
     this.rulerBox.addEventListener("focusin", (e) => {
@@ -819,7 +857,6 @@ export class MeasureCanvas {
       }
     };
 
-    // 純文字小框事件
     this.plainTextBox.querySelector(".mc-plain-cancel").onclick = () => {
       this.plainTextBox.classList.add("hidden");
       this.pendingPlainTextAction = null;
@@ -830,7 +867,6 @@ export class MeasureCanvas {
       if (e.key === "Enter") { e.preventDefault(); this.commitPlainText(true); }
     });
 
-    // 箭頭批改浮窗事件
     this.arrowBox.querySelectorAll(".mc-st-pill").forEach(pill => {
       pill.onclick = () => {
         this.selectedArrowStatus = pill.dataset.stkey;
@@ -860,46 +896,103 @@ export class MeasureCanvas {
       this.zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
     }, { passive: false });
 
+    // 防止 iOS Safari 雙指手勢觸發原生頁面縮放
+    this.canvas.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
+    this.canvas.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
+    this.canvas.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
+
+    // Procreate 級雙指觸控引擎（中心點鎖定縮放 + 同步雙指平移 + 雙指輕點 Undo + 防誤觸離屏鎖）
+    this.canvas.addEventListener("touchstart", (e) => {
+      if (e.touches.length >= 2) {
+        e.preventDefault();
+        // 取消任何進行中的單指草稿，避免多畫出廢線
+        this.isDrawing = false;
+        this.draftObj = null;
+        this.marqueeRect = null;
+        this.dragGroupState = null;
+        this.isPanning = false;
+
+        this.isTwoFingerGesture = true;
+        this.touchLiftGuard = true;
+        this.twoFingerMoved = false;
+        this.twoFingerTapStartTime = Date.now();
+
+        const rect = this.canvas.getBoundingClientRect();
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const cx = (t0.clientX + t1.clientX) / 2 - rect.left;
+        const cy = (t0.clientY + t1.clientY) / 2 - rect.top;
+
+        this.twoFingerStartDist = Math.max(10, Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY));
+        this.twoFingerStartScale = this.scale;
+        this.twoFingerStartImgMid = this.screenToImg(cx, cy);
+        this.twoFingerTapStartMid = { x: cx, y: cy };
+        this.scheduleRender();
+      }
+    }, { passive: false });
+
+    this.canvas.addEventListener("touchmove", (e) => {
+      if (e.touches.length >= 2 && this.isTwoFingerGesture) {
+        e.preventDefault();
+        const rect = this.canvas.getBoundingClientRect();
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const cx = (t0.clientX + t1.clientX) / 2 - rect.left;
+        const cy = (t0.clientY + t1.clientY) / 2 - rect.top;
+        const dist = Math.max(10, Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY));
+
+        if (!this.twoFingerMoved) {
+          const dMove = Math.hypot(cx - this.twoFingerTapStartMid.x, cy - this.twoFingerTapStartMid.y);
+          const dZoom = Math.abs(dist - this.twoFingerStartDist);
+          if (dMove > 8 || dZoom > 8) this.twoFingerMoved = true;
+        }
+
+        // Procreate 核心公式：同時計算縮放比例與雙指中點位移，讓手指按住的圖紙點永遠鎖在兩指正中間
+        const nextScale = Math.min(10, Math.max(0.18, this.twoFingerStartScale * (dist / this.twoFingerStartDist)));
+        this.scale = nextScale;
+        this.offsetX = cx - this.twoFingerStartImgMid.x * nextScale;
+        this.offsetY = cy - this.twoFingerStartImgMid.y * nextScale;
+
+        this.updateNearToolbar();
+        this.scheduleRender();
+      }
+    }, { passive: false });
+
+    this.canvas.addEventListener("touchend", (e) => {
+      if (this.isTwoFingerGesture && e.touches.length < 2) {
+        // 偵測 Procreate 雙指輕點（Two-finger tap = 復原上一步 Undo）
+        const elapsed = Date.now() - this.twoFingerTapStartTime;
+        if (!this.twoFingerMoved && elapsed < 280) {
+          this.undo();
+        }
+        this.isTwoFingerGesture = false;
+      }
+      // 必須等全部手指完全離開螢幕，才解除防誤觸鎖
+      if (e.touches.length === 0) {
+        this.touchLiftGuard = false;
+        this.isTwoFingerGesture = false;
+      }
+    }, { passive: true });
+
+    this.canvas.addEventListener("touchcancel", () => {
+      this.isTwoFingerGesture = false;
+      this.touchLiftGuard = false;
+    }, { passive: true });
+
     this.canvas.addEventListener("pointerdown", (e) => this.handlePointerDown(e));
     this.canvas.addEventListener("pointermove", (e) => this.handlePointerMove(e));
     this.canvas.addEventListener("pointerup", (e) => this.handlePointerUp(e));
     this.canvas.addEventListener("pointercancel", (e) => this.handlePointerUp(e));
-
-    this.canvas.addEventListener("touchstart", (e) => {
-      if (e.touches.length === 2) {
-        this.isDrawing = false;
-        this.draftObj = null;
-        this.marqueeRect = null;
-        this.pinchDist = Math.hypot(
-          e.touches[0].clientX - e.touches[1].clientX,
-          e.touches[0].clientY - e.touches[1].clientY
-        );
-      }
-    }, { passive: true });
-
-    this.canvas.addEventListener("touchmove", (e) => {
-      if (e.touches.length === 2 && this.pinchDist > 0) {
-        const newDist = Math.hypot(
-          e.touches[0].clientX - e.touches[1].clientX,
-          e.touches[0].clientY - e.touches[1].clientY
-        );
-        const rect = this.canvas.getBoundingClientRect();
-        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-        this.zoomAt(cx, cy, newDist / this.pinchDist);
-        this.pinchDist = newDist;
-      }
-    }, { passive: true });
   }
 
   zoomAt(sx, sy, factor) {
-    const newScale = Math.min(8, Math.max(0.2, this.scale * factor));
+    const newScale = Math.min(10, Math.max(0.18, this.scale * factor));
     const ratio = newScale / this.scale;
     this.offsetX = sx - (sx - this.offsetX) * ratio;
     this.offsetY = sy - (sy - this.offsetY) * ratio;
     this.scale = newScale;
     this.updateNearToolbar();
-    this.render();
+    this.scheduleRender();
   }
 
   startDragSelectedGroup(startImgPt) {
@@ -911,6 +1004,7 @@ export class MeasureCanvas {
   }
 
   handlePointerDown(e) {
+    if (this.isTwoFingerGesture || this.touchLiftGuard) return;
     if (e.pointerType === "touch" && !e.isPrimary) return;
     const rect = this.canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -930,7 +1024,7 @@ export class MeasureCanvas {
             obj.status = newStatus;
             this.emitSave(newTxt.trim() ? `[${this.formatStatusLabel(newStatus)}] ${newTxt.trim()}` : "", newStatus);
             this.updateNearToolbar();
-            this.render();
+            this.scheduleRender();
           });
         } else if (hit.type === "line") {
           this.openRulerEditor(sx, sy, obj.text || "", (newTxt) => {
@@ -938,7 +1032,7 @@ export class MeasureCanvas {
             obj.text = newTxt;
             this.emitSave();
             this.updateNearToolbar();
-            this.render();
+            this.scheduleRender();
           });
         } else {
           this.openPlainTextEditor(sx, sy, obj.text || obj.label || "", (newTxt) => {
@@ -947,7 +1041,7 @@ export class MeasureCanvas {
             else obj.text = newTxt;
             this.emitSave();
             this.updateNearToolbar();
-            this.render();
+            this.scheduleRender();
           });
         }
         this.lastTapTime = 0;
@@ -961,7 +1055,7 @@ export class MeasureCanvas {
       if (this.selectedItems.length) {
         this.selectedItems = [];
         this.updateNearToolbar();
-        this.render();
+        this.scheduleRender();
       }
       this.isPanning = true;
       this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
@@ -976,7 +1070,7 @@ export class MeasureCanvas {
         this.selectedItems = [];
         this.updateNearToolbar();
         this.emitSave();
-        this.render();
+        this.scheduleRender();
       }
       return;
     }
@@ -992,7 +1086,7 @@ export class MeasureCanvas {
           this.startDragSelectedGroup(pt);
         }
         this.updateNearToolbar();
-        this.render();
+        this.scheduleRender();
       } else {
         if (this.multiSelectMode) {
           this.marqueeRect = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
@@ -1002,13 +1096,13 @@ export class MeasureCanvas {
           this.isPanning = true;
           this.panStart = { x: sx - this.offsetX, y: sy - this.offsetY };
         }
-        this.render();
+        this.scheduleRender();
       }
       return;
     }
 
     if (this.mode === "TEXT") {
-      const adaptiveFs = this.getAdaptiveFontSize(18);
+      const imgFs = this.getImageSpaceFontSize(18);
       this.openPlainTextEditor(sx, sy, "", (txt) => {
         if (!txt.trim()) {
           this.setMode("VIEW");
@@ -1020,13 +1114,14 @@ export class MeasureCanvas {
           x: pt.x, y: pt.y,
           text: txt.trim(),
           color: this.activeColor,
-          fontSize: adaptiveFs
+          fontSize: imgFs,
+          _imgSpaceFont: true
         });
         this.setSingleSelection({ type: "marker", index: this.markers.length - 1 });
         this.setMode("VIEW");
         this.updateNearToolbar();
         this.emitSave();
-        this.render();
+        this.scheduleRender();
       });
       return;
     }
@@ -1037,8 +1132,9 @@ export class MeasureCanvas {
         type: "arrow",
         x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
         color: this.activeColor,
-        strokeWidth: this.strokeWidth,
-        fontSize: this.getAdaptiveFontSize(16),
+        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth),
+        fontSize: this.getImageSpaceFontSize(16),
+        _imgSpaceFont: true,
         text: "",
         status: "NEED_FIX"
       };
@@ -1051,8 +1147,9 @@ export class MeasureCanvas {
         type: "line",
         x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
         color: this.activeColor,
-        strokeWidth: this.strokeWidth,
-        fontSize: this.getAdaptiveFontSize(15),
+        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth),
+        fontSize: this.getImageSpaceFontSize(15),
+        _imgSpaceFont: true,
         text: ""
       };
       return;
@@ -1064,12 +1161,13 @@ export class MeasureCanvas {
         type: "path",
         points: [{ x: pt.x, y: pt.y }],
         color: this.activeColor,
-        strokeWidth: this.strokeWidth
+        strokeWidth: this.getImageSpaceStrokeWidth(this.strokeWidth)
       };
     }
   }
 
   handlePointerMove(e) {
+    if (this.isTwoFingerGesture || this.touchLiftGuard) return;
     if (e.pointerType === "touch" && !e.isPrimary) return;
     const rect = this.canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -1079,7 +1177,7 @@ export class MeasureCanvas {
       this.offsetX = sx - this.panStart.x;
       this.offsetY = sy - this.panStart.y;
       this.updateNearToolbar();
-      this.render();
+      this.scheduleRender();
       return;
     }
 
@@ -1088,7 +1186,7 @@ export class MeasureCanvas {
     if (this.marqueeRect) {
       this.marqueeRect.x2 = pt.x;
       this.marqueeRect.y2 = pt.y;
-      this.render();
+      this.scheduleRender();
       return;
     }
 
@@ -1113,7 +1211,7 @@ export class MeasureCanvas {
         }
       });
       this.updateNearToolbar();
-      this.render();
+      this.scheduleRender();
       return;
     }
 
@@ -1123,7 +1221,7 @@ export class MeasureCanvas {
       } else if (this.draftObj.type === "path") {
         this.draftObj.points.push({ x: pt.x, y: pt.y });
       }
-      this.render();
+      this.scheduleRender();
     }
   }
 
@@ -1150,7 +1248,7 @@ export class MeasureCanvas {
         this.overlays.forEach((ov, i) => { if (inBox(ov.x, ov.y)) addIfNew("overlay", i); });
       }
       this.updateNearToolbar();
-      this.render();
+      this.scheduleRender();
       return;
     }
 
@@ -1167,14 +1265,14 @@ export class MeasureCanvas {
     this.draftObj = null;
 
     if (finished.type === "arrow") {
-      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10) {
-        this.render();
+      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10 / this.scale) {
+        this.scheduleRender();
         return;
       }
       this.pushUndoSnapshot();
       this.arrows.push(finished);
       this.setSingleSelection({ type: "arrow", index: this.arrows.length - 1 });
-      this.render();
+      this.scheduleRender();
 
       const tailScr = this.imgToScreen(finished.x2, finished.y2);
       this.openArrowEditor(tailScr.x, tailScr.y, "", "NEED_FIX", (txt, status) => {
@@ -1184,27 +1282,27 @@ export class MeasureCanvas {
         this.setMode("VIEW");
         this.updateNearToolbar();
         this.emitSave(cleanTxt ? `[${this.formatStatusLabel(status)}] ${cleanTxt}` : "", status);
-        this.render();
+        this.scheduleRender();
       });
       return;
     }
 
     if (finished.type === "line") {
-      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10) {
-        this.render();
+      if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 10 / this.scale) {
+        this.scheduleRender();
         return;
       }
       this.pushUndoSnapshot();
       this.lines.push(finished);
       this.setSingleSelection({ type: "line", index: this.lines.length - 1 });
-      this.render();
+      this.scheduleRender();
 
       const midScr = this.imgToScreen((finished.x1 + finished.x2) / 2, (finished.y1 + finished.y2) / 2);
       this.openRulerEditor(midScr.x, midScr.y, "", (txt) => {
         finished.text = txt.trim();
         this.updateNearToolbar();
         this.emitSave();
-        this.render();
+        this.scheduleRender();
       });
       return;
     }
@@ -1215,7 +1313,7 @@ export class MeasureCanvas {
       this.setSingleSelection({ type: "path", index: this.paths.length - 1 });
       this.updateNearToolbar();
       this.emitSave();
-      this.render();
+      this.scheduleRender();
     }
   }
 
@@ -1554,10 +1652,10 @@ export class MeasureCanvas {
       } else {
         colorsWrap.style.display = "flex";
         if (lastSel.type === "marker" || lastSel.type === "sticker" || lastSel.type === "arrow" || lastSel.type === "line") {
-          valEl.textContent = String(obj.fontSize || (lastSel.type === "line" ? 15 : 18));
+          valEl.textContent = String(Math.round(obj.fontSize || 24));
           editBtn.style.display = "inline-flex";
         } else {
-          valEl.textContent = String(obj.strokeWidth || 1.5);
+          valEl.textContent = String(obj.strokeWidth || 2);
           editBtn.style.display = "none";
         }
       }
@@ -1582,15 +1680,16 @@ export class MeasureCanvas {
     else if (type === "overlay") this.overlays.splice(idx, 1);
   }
 
-  getPillBoundsImg(ix, iy, text, fontPx = 15, targetScale = this.scale) {
-    const fs = fontPx / targetScale;
+  // 直接以底圖座標系計算文字標籤邊界，確保放大縮小時嚴格跟隨底圖等比縮放
+  getPillBoundsImg(ix, iy, text, imgFontPx = 24) {
+    const fs = imgFontPx;
     this.ctx.save();
     this.ctx.font = `800 ${fs}px sans-serif`;
     const lines = String(text || "").split("\n");
-    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), 20 / targetScale);
+    const maxW = Math.max(...lines.map(l => this.ctx.measureText(l).width), fs * 1.1);
     this.ctx.restore();
-    const padX = 8 / targetScale;
-    const padY = 5 / targetScale;
+    const padX = fs * 0.45;
+    const padY = fs * 0.28;
     const lineH = fs * 1.25;
     const boxW = maxW + padX * 2;
     const boxH = lines.length * lineH + padY * 2;
@@ -1598,13 +1697,13 @@ export class MeasureCanvas {
   }
 
   getMarkerBoundsImg(m) {
-    const fs = (m.fontSize || 18) / this.scale;
+    const fs = m.fontSize || 28;
     this.ctx.save();
     this.ctx.font = `800 ${fs}px sans-serif`;
-    const wText = Math.max(this.ctx.measureText(m.text || "").width, 20 / this.scale);
+    const wText = Math.max(this.ctx.measureText(m.text || "").width, fs * 1.1);
     this.ctx.restore();
-    const padX = 6 / this.scale;
-    const padY = 4 / this.scale;
+    const padX = fs * 0.35;
+    const padY = fs * 0.24;
     const w = wText + padX * 2;
     const h = fs + padY * 2;
     return { x: m.x - w / 2, y: m.y - h / 2, w, h };
@@ -1614,7 +1713,7 @@ export class MeasureCanvas {
     const tol = 26 / this.scale;
     for (let i = this.stickers.length - 1; i >= 0; i--) {
       const s = this.stickers[i];
-      const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 15);
+      const b = this.getPillBoundsImg(s.x, s.y, s.label, s.fontSize || 24);
       if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
         return { type: "sticker", index: i };
       }
@@ -1630,7 +1729,7 @@ export class MeasureCanvas {
       const a = this.arrows[i];
       if (this.distToSegment(ix, iy, a.x1, a.y1, a.x2, a.y2) < tol) return { type: "arrow", index: i };
       if (a.text) {
-        const b = this.getPillBoundsImg(a.x2, a.y2, a.text, a.fontSize || 16);
+        const b = this.getPillBoundsImg(a.x2, a.y2, a.text, a.fontSize || 26);
         if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
           return { type: "arrow", index: i };
         }
@@ -1639,6 +1738,12 @@ export class MeasureCanvas {
     for (let i = this.lines.length - 1; i >= 0; i--) {
       const l = this.lines[i];
       if (this.distToSegment(ix, iy, l.x1, l.y1, l.x2, l.y2) < tol) return { type: "line", index: i };
+      if (l.text) {
+        const b = this.getPillBoundsImg((l.x1 + l.x2) / 2, (l.y1 + l.y2) / 2, l.text, l.fontSize || 24);
+        if (ix >= b.x - tol / 2 && ix <= b.x + b.w + tol / 2 && iy >= b.y - tol / 2 && iy <= b.y + b.h + tol / 2) {
+          return { type: "line", index: i };
+        }
+      }
     }
     for (let i = this.paths.length - 1; i >= 0; i--) {
       const p = this.paths[i];
@@ -1703,7 +1808,7 @@ export class MeasureCanvas {
         ctx.drawImage(im, ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
         const isSel = this.isItemSelected("overlay", idx);
         ctx.strokeStyle = isSel ? "#FACC15" : "#64748B";
-        ctx.lineWidth = (isSel ? 3 : 1.2) / this.scale;
+        ctx.lineWidth = isSel ? Math.max(4, 3 / this.scale) : Math.max(1.5, 1.2 / this.scale);
         ctx.strokeRect(ov.x - ov.w / 2, ov.y - ov.h / 2, ov.w, ov.h);
         ctx.restore();
       }
@@ -1713,8 +1818,9 @@ export class MeasureCanvas {
     allPaths.forEach((p, idx) => {
       if (!p.points || p.points.length < 2) return;
       ctx.save();
+      const sw = p.strokeWidth || 3;
       ctx.strokeStyle = p.color || "#DC2626";
-      ctx.lineWidth = (p.strokeWidth || 1.5) / this.scale;
+      ctx.lineWidth = sw;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.beginPath();
@@ -1723,7 +1829,7 @@ export class MeasureCanvas {
       ctx.stroke();
       if (this.isItemSelected("path", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = ((p.strokeWidth || 1.5) + 4) / this.scale;
+        ctx.lineWidth = sw + 5 / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.stroke();
       }
@@ -1733,7 +1839,7 @@ export class MeasureCanvas {
     const allLines = this.draftObj?.type === "line" ? [...this.lines, this.draftObj] : this.lines;
     allLines.forEach((l, idx) => {
       ctx.save();
-      const sw = (l.strokeWidth || 1.8) / this.scale;
+      const sw = l.strokeWidth || 3;
       ctx.strokeStyle = l.color || "#2563EB";
       ctx.lineWidth = sw;
       ctx.beginPath();
@@ -1741,7 +1847,7 @@ export class MeasureCanvas {
       ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
 
-      const r = 4 / this.scale;
+      const r = Math.max(4, sw * 1.4);
       ctx.fillStyle = l.color || "#2563EB";
       ctx.beginPath();
       ctx.arc(l.x1, l.y1, r, 0, Math.PI * 2);
@@ -1751,11 +1857,11 @@ export class MeasureCanvas {
       if (l.text) {
         const mx = (l.x1 + l.x2) / 2;
         const my = (l.y1 + l.y2) / 2;
-        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 15, 0.88, this.scale, false);
+        this.drawPillLabelOnContext(ctx, mx, my, l.text, "#FFFFFF", l.color || "#2563EB", l.fontSize || 24, 0.88, false);
       }
       if (this.isItemSelected("line", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = sw + 4 / this.scale;
+        ctx.lineWidth = sw + 5 / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
         ctx.moveTo(l.x1, l.y1);
@@ -1769,7 +1875,7 @@ export class MeasureCanvas {
     allArrows.forEach((a, idx) => {
       ctx.save();
       const col = a.color || "#DC2626";
-      const sw = (a.strokeWidth || 1.8) / this.scale;
+      const sw = a.strokeWidth || 3;
       ctx.strokeStyle = col;
       ctx.fillStyle = col;
       ctx.lineWidth = sw;
@@ -1779,7 +1885,7 @@ export class MeasureCanvas {
       ctx.stroke();
 
       const ang = Math.atan2(a.y1 - a.y2, a.x1 - a.x2);
-      const headLen = 12 / this.scale;
+      const headLen = Math.max(16, sw * 4.5);
       ctx.beginPath();
       ctx.moveTo(a.x1, a.y1);
       ctx.lineTo(a.x1 - headLen * Math.cos(ang - Math.PI / 6), a.y1 - headLen * Math.sin(ang - Math.PI / 6));
@@ -1789,11 +1895,11 @@ export class MeasureCanvas {
 
       const isSel = this.isItemSelected("arrow", idx);
       if (a.text) {
-        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 16, 0.78, this.scale, isSel);
+        this.drawPillLabelOnContext(ctx, a.x2, a.y2, a.text, col, "#FFFFFF", a.fontSize || 26, 0.8, isSel);
       }
       if (isSel) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = sw + 4 / this.scale;
+        ctx.lineWidth = sw + 5 / this.scale;
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
         ctx.moveTo(a.x1, a.y1);
@@ -1806,10 +1912,10 @@ export class MeasureCanvas {
     this.markers.forEach((m, idx) => {
       ctx.save();
       const b = this.getMarkerBoundsImg(m);
-      const fs = (m.fontSize || 18) / this.scale;
+      const fs = m.fontSize || 28;
       ctx.fillStyle = "rgba(255,255,255,0.78)";
       ctx.beginPath();
-      ctx.roundRect(b.x, b.y, b.w, b.h, 4 / this.scale);
+      ctx.roundRect(b.x, b.y, b.w, b.h, fs * 0.24);
       ctx.fill();
 
       ctx.font = `800 ${fs}px sans-serif`;
@@ -1820,7 +1926,7 @@ export class MeasureCanvas {
 
       if (this.isItemSelected("marker", idx)) {
         ctx.strokeStyle = "#FACC15";
-        ctx.lineWidth = 2.5 / this.scale;
+        ctx.lineWidth = 3 / this.scale;
         ctx.strokeRect(b.x, b.y, b.w, b.h);
       }
       ctx.restore();
@@ -1829,7 +1935,7 @@ export class MeasureCanvas {
     this.stickers.forEach((st, idx) => {
       ctx.save();
       const isSel = this.isItemSelected("sticker", idx);
-      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 15, 0.76, this.scale, isSel);
+      this.drawPillLabelOnContext(ctx, st.x, st.y, st.label || "", st.bg || "#DC2626", st.color || "#FFFFFF", st.fontSize || 24, 0.78, isSel);
       ctx.restore();
     });
 
@@ -1851,10 +1957,11 @@ export class MeasureCanvas {
     ctx.restore();
   }
 
-  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, fontPx = 15, bgAlpha = 0.76, targetScale = this.scale, isSelected = false) {
-    const b = this.getPillBoundsImg(ix, iy, text, fontPx, targetScale);
-    const fs = fontPx / targetScale;
-    const padY = 5 / targetScale;
+  // 直接在底圖座標系繪製字體與標籤底框，保證放大縮小時字體完全跟隨圖紙比例縮放
+  drawPillLabelOnContext(ctx, ix, iy, text, bg, fg, imgFontPx = 24, bgAlpha = 0.8, isSelected = false) {
+    const b = this.getPillBoundsImg(ix, iy, text, imgFontPx);
+    const fs = imgFontPx;
+    const padY = fs * 0.28;
     const lineH = fs * 1.25;
     const lines = String(text || "").split("\n");
 
@@ -1862,12 +1969,12 @@ export class MeasureCanvas {
     ctx.globalAlpha = bgAlpha;
     ctx.fillStyle = bg;
     ctx.beginPath();
-    ctx.roundRect(b.x, b.y, b.w, b.h, 6 / targetScale);
+    ctx.roundRect(b.x, b.y, b.w, b.h, fs * 0.28);
     ctx.fill();
 
     ctx.globalAlpha = 1;
     ctx.strokeStyle = isSelected ? "#FACC15" : bg;
-    ctx.lineWidth = (isSelected ? 2.8 : 1.2) / targetScale;
+    ctx.lineWidth = isSelected ? Math.max(3, 2.8 / this.scale) : Math.max(1.5, 1.2 / this.scale);
     ctx.stroke();
 
     ctx.font = `800 ${fs}px sans-serif`;
