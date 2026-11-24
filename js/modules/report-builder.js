@@ -219,7 +219,7 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
       <style>
         @page {
           size: ${isLandscape ? "A4 landscape" : "A4 portrait"};
-          margin: 2mm;
+          margin: 5mm;
         }
         @media print {
           html, body {
@@ -254,12 +254,14 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
             break-after: auto !important;
           }
           .rpt-half-slot {
-            display: block !important;
+            display: flex !important;
+            flex-direction: column !important;
             width: 100% !important;
-            height: ${isLandscape ? "202mm" : "143mm"} !important;
-            margin: 0 0 ${isLandscape ? "0" : "1.5mm"} 0 !important;
+            height: ${isLandscape ? "194mm" : "136mm"} !important;
+            max-height: ${isLandscape ? "194mm" : "136mm"} !important;
+            margin: 0 0 ${isLandscape ? "0" : "2mm"} 0 !important;
             padding: 2px 3px !important;
-            border: 0.4pt solid #CBD5E1 !important;
+            border: 0.5pt solid #CBD5E1 !important;
             border-radius: 2px !important;
             box-sizing: border-box !important;
             overflow: hidden !important;
@@ -274,6 +276,7 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
             display: flex !important;
             justify-content: space-between !important;
             align-items: center !important;
+            flex-shrink: 0 !important;
             height: 4.5mm !important;
             border-bottom: 0.4pt solid #E2E8F0 !important;
             margin-bottom: 1mm !important;
@@ -281,9 +284,11 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
           }
           .rpt-half-img {
             display: block !important;
+            flex: 1 1 auto !important;
+            min-height: 0 !important;
             width: 100% !important;
-            height: ${isLandscape ? "188mm" : "128mm"} !important;
-            max-height: ${isLandscape ? "188mm" : "128mm"} !important;
+            height: ${isLandscape ? "182mm" : "124mm"} !important;
+            max-height: ${isLandscape ? "182mm" : "124mm"} !important;
             object-fit: contain !important;
             margin: 0 !important;
             padding: 0 !important;
@@ -292,10 +297,11 @@ function renderFormattedReportSheetView(container, data, onCloseAction) {
           .rpt-meta-bar {
             display: flex !important;
             flex-wrap: wrap !important;
+            flex-shrink: 0 !important;
             gap: 2px !important;
             align-items: center !important;
-            margin-top: 0.8mm !important;
-            max-height: 7mm !important;
+            margin-top: 1mm !important;
+            max-height: 8mm !important;
             overflow: hidden !important;
           }
         }
